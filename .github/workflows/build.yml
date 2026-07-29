@@ -24,8 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Fetch the private trendvidia modules with the runner's own git credentials.
-  GOPRIVATE: github.com/trendvidia/*
+  # Fetch the private belluikit modules with the runner's own git credentials.
+  GOPRIVATE: github.com/belluikit/*
   # Pinned so every target is built from identical sources. Bump deliberately.
   FFMPEG_REPO: https://github.com/FFmpeg/FFmpeg.git
   FFMPEG_REF: e2bc6d88cd68184288c16570e04881c3a426a05a
@@ -64,8 +64,8 @@ jobs:
       # loaded", and a test that only checks that a bad path errors still passes.
       - name: Stage the purego shared library
         run: |
-          V=$(go list -m -f '{{.Version}}' github.com/trendvidia/goffmpeg-libs/darwin_arm64)
-          SRC="$(go env GOMODCACHE)/github.com/trendvidia/goffmpeg-libs/darwin_arm64@$V/lib/libgoffmpeg.dylib"
+          V=$(go list -m -f '{{.Version}}' github.com/belluikit/goffmpeg-libs/darwin_arm64)
+          SRC="$(go env GOMODCACHE)/github.com/belluikit/goffmpeg-libs/darwin_arm64@$V/lib/libgoffmpeg.dylib"
           test -f "$SRC" || { echo "::error::no shared library in $SRC"; exit 1; }
           mkdir -p internal/libav/dist/darwin_arm64/lib
           cp "$SRC" internal/libav/dist/darwin_arm64/lib/
@@ -144,7 +144,7 @@ jobs:
       - name: Clone companion modules
         run: |
           rm -rf "$RUNNER_TEMP/libs"
-          git clone --depth 1 https://github.com/trendvidia/goffmpeg-libs.git "$RUNNER_TEMP/libs"
+          git clone --depth 1 https://github.com/belluikit/goffmpeg-libs.git "$RUNNER_TEMP/libs"
 
       # `go build` never links a library package, so a missing system library
       # stays invisible until something links a binary. `go test -c` produces
@@ -156,7 +156,7 @@ jobs:
         run: |
           make sync-libs TARGET=${{ matrix.target }} LIBS_REPO="$RUNNER_TEMP/libs"
           go mod edit -replace \
-            github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
+            github.com/belluikit/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
           case "${{ matrix.target }}" in
             darwin_arm64) export GOOS=darwin GOARCH=arm64 ;;
             darwin_amd64) export GOOS=darwin GOARCH=amd64 ;;
@@ -226,13 +226,13 @@ jobs:
       - name: Clone companion modules
         run: |
           rm -rf "$RUNNER_TEMP/libs"
-          git clone --depth 1 https://github.com/trendvidia/goffmpeg-libs.git "$RUNNER_TEMP/libs"
+          git clone --depth 1 https://github.com/belluikit/goffmpeg-libs.git "$RUNNER_TEMP/libs"
 
       - name: Link check ${{ matrix.target }}
         run: |
           make sync-libs TARGET=${{ matrix.target }} LIBS_REPO="$RUNNER_TEMP/libs"
           go mod edit -replace \
-            github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
+            github.com/belluikit/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
           case "${{ matrix.target }}" in
             linux_amd64)   export GOOS=linux GOARCH=amd64 ;;
             windows_amd64) export GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc ;;
@@ -260,10 +260,10 @@ jobs:
         if: matrix.target == 'linux_amd64'
         run: |
           go mod edit -replace \
-            github.com/trendvidia/goffmpeg-libs/linux_amd64=$RUNNER_TEMP/libs/linux_amd64
+            github.com/belluikit/goffmpeg-libs/linux_amd64=$RUNNER_TEMP/libs/linux_amd64
           # Prove it: the replace must resolve to the clone, not the cache.
           go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
-            github.com/trendvidia/goffmpeg-libs/linux_amd64
+            github.com/belluikit/goffmpeg-libs/linux_amd64
           go test -race -count=1 ./...
 
       - name: Restore go.mod
@@ -312,7 +312,7 @@ jobs:
 
       - name: Fetch the published module
         run: |
-          MOD=github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}
+          MOD=github.com/belluikit/goffmpeg-libs/${{ matrix.target }}
           go mod download "$MOD"
           V=$(go list -m -f '{{.Version}}' "$MOD")
           SRC="$(go env GOMODCACHE)/$MOD@$V"
@@ -388,7 +388,7 @@ jobs:
 
       - name: Point at the staged libraries
         shell: cmd
-        run: go mod edit -replace github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}=${{ runner.temp }}\libs\${{ matrix.target }}
+        run: go mod edit -replace github.com/belluikit/goffmpeg-libs/${{ matrix.target }}=${{ runner.temp }}\libs\${{ matrix.target }}
 
       - name: Test (cgo)
         shell: cmd
@@ -440,13 +440,13 @@ jobs:
       - name: Point the tests at the libraries just built
         run: |
           rm -rf "$RUNNER_TEMP/libs"
-          git clone --depth 1 https://github.com/trendvidia/goffmpeg-libs.git "$RUNNER_TEMP/libs"
+          git clone --depth 1 https://github.com/belluikit/goffmpeg-libs.git "$RUNNER_TEMP/libs"
           make sync-libs TARGET=linux_arm64 LIBS_REPO="$RUNNER_TEMP/libs"
           go mod edit -replace \
-            github.com/trendvidia/goffmpeg-libs/linux_arm64=$RUNNER_TEMP/libs/linux_arm64
+            github.com/belluikit/goffmpeg-libs/linux_arm64=$RUNNER_TEMP/libs/linux_arm64
           # Prove it: the replace must resolve to the clone, not the cache.
           go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
-            github.com/trendvidia/goffmpeg-libs/linux_arm64
+            github.com/belluikit/goffmpeg-libs/linux_arm64
 
       # The #14 regression, run on its own and verbosely.
       #

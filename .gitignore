@@ -2,7 +2,7 @@
 internal/libav/build/
 
 # Build output. The static libraries are published as per-platform companion
-# modules under github.com/trendvidia/goffmpeg-libs, so nothing here is
+# modules under github.com/belluikit/goffmpeg-libs, so nothing here is
 # committed — only the shared headers in internal/libav/include are, since the
 # FFmpeg public headers are identical across every target.
 #
