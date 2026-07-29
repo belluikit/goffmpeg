@@ -1,0 +1,480 @@
+name: build
+
+# Builds the FFmpeg artifacts for every supported target.
+#
+# Runs on the self-hosted machines: they carry the toolchains (Xcode SDKs,
+# Android NDK, mingw-w64, llvm-mingw) and their own git credentials, so the
+# private companion modules resolve without a PAT.
+#
+# The full matrix is expensive — eleven FFmpeg builds — and those artifacts only
+# change when the pinned revision or the configure line does. It therefore runs
+# on demand and when the build inputs change. Ordinary pushes get the `bindings`
+# and `windows-test` jobs, which exercise the Go code against the published
+# modules — macOS for the general case, Windows because the dshow paths and the
+# purego bindings have historically regressed there and nowhere else.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fetch the private trendvidia modules with the runner's own git credentials.
+  GOPRIVATE: github.com/trendvidia/*
+  # Pinned so every target is built from identical sources. Bump deliberately.
+  FFMPEG_REPO: https://github.com/FFmpeg/FFmpeg.git
+  FFMPEG_REF: e2bc6d88cd68184288c16570e04881c3a426a05a
+
+jobs:
+  # Cheap leg: the Go bindings against the published companion modules. This is
+  # what guards day-to-day changes to the bridge and the Go API.
+  bindings:
+    name: bindings (macOS ARM64)
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (cgo)
+        run: go test -race -count=1 ./...
+
+      # purego dlopens libgoffmpeg rather than linking it, and a fresh checkout
+      # has no dist/ (it is gitignored). Stage the shared library out of the
+      # module cache, which also means this exercises the published artifact.
+      #
+      # The purego leg matters: without a decode test here, a missing or
+      # unloadable shared object is invisible — Open fails with "library not
+      # loaded", and a test that only checks that a bad path errors still passes.
+      - name: Stage the purego shared library
+        run: |
+          V=$(go list -m -f '{{.Version}}' github.com/trendvidia/goffmpeg-libs/darwin_arm64)
+          SRC="$(go env GOMODCACHE)/github.com/trendvidia/goffmpeg-libs/darwin_arm64@$V/lib/libgoffmpeg.dylib"
+          test -f "$SRC" || { echo "::error::no shared library in $SRC"; exit 1; }
+          mkdir -p internal/libav/dist/darwin_arm64/lib
+          cp "$SRC" internal/libav/dist/darwin_arm64/lib/
+
+      - name: Test (purego)
+        run: CGO_ENABLED=0 go test -count=1 ./...
+
+  # Whether the expensive matrix should run at all.
+  should-build:
+    name: decide
+    runs-on: [self-hosted, macOS, ARM64]
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # patches/ counts: it changes the FFmpeg sources the artifacts are
+          # built from, so a patch added without a rebuild ships libraries that
+          # do not contain it — silently, since nothing here would notice.
+          if git diff --name-only HEAD~1 HEAD | grep -qE '^(Makefile|bridge\.c|bridge\.h|bridge_reader\.c|patches/.+\.patch|\.github/workflows/build\.yml)$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::FFmpeg build inputs unchanged — skipping the matrix. Use workflow_dispatch to force it."
+          fi
+
+  # Apple and Android build on the same machine: the NDK cross-compiles from
+  # macOS, and the Xcode SDKs are only here.
+  apple-android:
+    name: ${{ matrix.target }}
+    needs: should-build
+    if: needs.should-build.outputs.run == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - darwin_arm64
+          - darwin_amd64
+          - ios_arm64
+          - iossimulator_arm64
+          - android_arm64
+          - android_arm
+          - android_amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch FFmpeg
+        run: |
+          rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
+          git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
+
+      - name: Build ${{ matrix.target }}
+        run: make dist TARGET=${{ matrix.target }}
+
+      # Desktop only: purego dlopens this, and the mobile targets configure
+      # FFmpeg with --disable-avdevice and have no purego consumer.
+      #
+      # darwin_amd64 cross-builds from this arm64 machine — the Makefile picks
+      # the -arch, and the static libraries it links are the ones just built.
+      - name: Shared bridge ${{ matrix.target }}
+        if: startsWith(matrix.target, 'darwin_')
+        run: make bridge-shared TARGET=${{ matrix.target }}
+
+      # actions/checkout cannot place a second repository outside the workspace,
+      # and sync-libs alone copies only lib/ — leaving no go.mod for the
+      # replace to point at. Cloning the companion repo gives a real module;
+      # sync-libs then overwrites its lib/ with the freshly built artifacts, so
+      # the link check still validates this build rather than the published one.
+      - name: Clone companion modules
+        run: |
+          rm -rf "$RUNNER_TEMP/libs"
+          git clone --depth 1 https://github.com/trendvidia/goffmpeg-libs.git "$RUNNER_TEMP/libs"
+
+      # `go build` never links a library package, so a missing system library
+      # stays invisible until something links a binary. `go test -c` produces
+      # one — this is how the Windows import libraries were found.
+      #
+      # It links against the libraries just built rather than the published
+      # module, so a regression is caught before it is tagged.
+      - name: Link check ${{ matrix.target }}
+        run: |
+          make sync-libs TARGET=${{ matrix.target }} LIBS_REPO="$RUNNER_TEMP/libs"
+          go mod edit -replace \
+            github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
+          case "${{ matrix.target }}" in
+            darwin_arm64) export GOOS=darwin GOARCH=arm64 ;;
+            darwin_amd64) export GOOS=darwin GOARCH=amd64 ;;
+            ios_arm64)
+              export GOOS=ios GOARCH=arm64
+              SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+              export CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -mios-version-min=13.0" ;;
+            iossimulator_arm64)
+              export GOOS=ios GOARCH=arm64 TAGS=iossimulator
+              SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+              export CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -mios-simulator-version-min=13.0" ;;
+            android_*)
+              NDK=$(ls -d "$HOME"/Library/Android/sdk/ndk/* | tail -1)
+              BIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+              export GOOS=android
+              case "${{ matrix.target }}" in
+                android_arm64) export GOARCH=arm64 CC="$BIN/aarch64-linux-android21-clang" ;;
+                android_arm)   export GOARCH=arm GOARM=7 CC="$BIN/armv7a-linux-androideabi21-clang" ;;
+                android_amd64) export GOARCH=amd64 CC="$BIN/x86_64-linux-android21-clang" ;;
+              esac ;;
+          esac
+          # A developer shell often exports these pointing at Homebrew, which
+          # would supply a different FFmpeg to a cross build.
+          unset CGO_CFLAGS CGO_LDFLAGS
+          CGO_ENABLED=1 go test -c -o /dev/null ${TAGS:+-tags $TAGS} .
+          git checkout go.mod
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libav-${{ matrix.target }}
+          path: internal/libav/dist/${{ matrix.target }}
+          retention-days: 14
+
+  # linux/amd64 natively, plus both Windows targets cross-built here: mingw-w64
+  # covers x86_64, llvm-mingw covers aarch64.
+  linux-windows:
+    name: ${{ matrix.target }}
+    needs: should-build
+    if: needs.should-build.outputs.run == 'true'
+    runs-on: [self-hosted, trader]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux_amd64, windows_amd64, windows_arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch FFmpeg
+        run: |
+          rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
+          git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
+
+      - name: Build ${{ matrix.target }}
+        run: make dist TARGET=${{ matrix.target }} NPROC=$(nproc) LLVM_MINGW=/opt/llvm-mingw
+
+      # Every target on this runner is a desktop one, so all three get a shared
+      # bridge: the Windows legs test against it on a real Windows runner, and
+      # linux_amd64 ships it to purego consumers like the rest.
+      - name: Shared bridge ${{ matrix.target }}
+        run: make bridge-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw
+
+      # actions/checkout cannot place a second repository outside the workspace,
+      # and sync-libs alone copies only lib/ — leaving no go.mod for the
+      # replace to point at. Cloning the companion repo gives a real module;
+      # sync-libs then overwrites its lib/ with the freshly built artifacts, so
+      # the link check still validates this build rather than the published one.
+      - name: Clone companion modules
+        run: |
+          rm -rf "$RUNNER_TEMP/libs"
+          git clone --depth 1 https://github.com/trendvidia/goffmpeg-libs.git "$RUNNER_TEMP/libs"
+
+      - name: Link check ${{ matrix.target }}
+        run: |
+          make sync-libs TARGET=${{ matrix.target }} LIBS_REPO="$RUNNER_TEMP/libs"
+          go mod edit -replace \
+            github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
+          case "${{ matrix.target }}" in
+            linux_amd64)   export GOOS=linux GOARCH=amd64 ;;
+            windows_amd64) export GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc ;;
+            windows_arm64) export GOOS=windows GOARCH=arm64 CC=/opt/llvm-mingw/bin/aarch64-w64-mingw32-gcc ;;
+          esac
+          unset CGO_CFLAGS CGO_LDFLAGS
+          CGO_ENABLED=1 go test -c -o /dev/null .
+          git checkout go.mod
+
+      # This runner is the linux/amd64 target, so run the suite rather than
+      # only linking it.
+      #
+      # The replace has to be re-applied: the link check above reverts go.mod
+      # when it finishes, and without it this would link the *published*
+      # companion module instead of the FFmpeg this job just built —
+      # libav_linux_amd64.go blank-imports goffmpeg-libs/linux_amd64, whose
+      # `#cgo LDFLAGS: -L${SRCDIR}/lib` resolves into the module cache.
+      #
+      # That is the same hole linux_arm64 had. It is worth being blunt about
+      # what it costs: a patch to FFmpeg was compiled on that runner and never
+      # reached the test binary, so the suite passed while testing a different
+      # library, and the wrong conclusion survived two rounds of investigation
+      # before anyone looked at where the linker was actually pointing.
+      - name: Test ${{ matrix.target }}
+        if: matrix.target == 'linux_amd64'
+        run: |
+          go mod edit -replace \
+            github.com/trendvidia/goffmpeg-libs/linux_amd64=$RUNNER_TEMP/libs/linux_amd64
+          # Prove it: the replace must resolve to the clone, not the cache.
+          go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
+            github.com/trendvidia/goffmpeg-libs/linux_amd64
+          go test -race -count=1 ./...
+
+      - name: Restore go.mod
+        if: always() && matrix.target == 'linux_amd64'
+        run: git checkout go.mod
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libav-${{ matrix.target }}
+          path: internal/libav/dist/${{ matrix.target }}
+          retention-days: 14
+
+      # The Windows runners have no credentials for the private companion
+      # repository, so hand them the assembled module — go.mod and the cgo
+      # directives from the clone, lib/ from this build — as an artifact.
+      - uses: actions/upload-artifact@v4
+        if: startsWith(matrix.target, 'windows_')
+        with:
+          name: libsmod-${{ matrix.target }}
+          path: ${{ runner.temp }}/libs/${{ matrix.target }}
+          retention-days: 14
+
+  # The published companion module, staged by a machine that has credentials for
+  # the private repository so the Windows runners never need any.
+  #
+  # This is what lets the Windows legs run on an ordinary push instead of only
+  # when the FFmpeg matrix does. That distinction matters: the last two Windows
+  # bugs (#6's int return width, and the symbol lookup that would not compile)
+  # were both in Go code, and a Go-only change does not trigger the matrix — so
+  # the legs that would have caught them would not have run.
+  #
+  # Unconditional, though it is only consumed when the matrix is skipped. Gating
+  # it on that would mean this path never runs on any change to this file —
+  # build.yml is itself one of the triggers, so a workflow edit always forces
+  # the matrix — and a fallback that is only exercised by other people's commits
+  # is one that breaks silently. The cost is one file copy and one upload.
+  windows-libs:
+    name: stage published libs ${{ matrix.target }}
+    runs-on: [self-hosted, trader]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [windows_amd64, windows_arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the published module
+        run: |
+          MOD=github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}
+          go mod download "$MOD"
+          V=$(go list -m -f '{{.Version}}' "$MOD")
+          SRC="$(go env GOMODCACHE)/$MOD@$V"
+          test -d "$SRC" || { echo "::error::no module at $SRC"; exit 1; }
+          rm -rf "$RUNNER_TEMP/libs"
+          mkdir -p "$RUNNER_TEMP/libs"
+          # The module cache is read-only; the copy has to be writable because
+          # the consuming job replaces into it.
+          cp -R "$SRC" "$RUNNER_TEMP/libs/${{ matrix.target }}"
+          chmod -R u+w "$RUNNER_TEMP/libs/${{ matrix.target }}"
+          echo "::notice::staged $MOD@$V"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsmod-published-${{ matrix.target }}
+          path: ${{ runner.temp }}/libs/${{ matrix.target }}
+          retention-days: 14
+
+  # The Windows artifacts are cross-built on Linux, so nothing above ever
+  # executes Windows code — a link check proves the symbols resolve, not that a
+  # call works. These legs run the suite on real Windows. Both machines have a
+  # camera attached, so the dshow capture test exercises hardware rather than
+  # skipping.
+  #
+  # Runs on every push. When the matrix ran, it tests the libraries just built,
+  # so a bridge regression is caught before it is tagged; otherwise it tests the
+  # published ones, which is what a Go-only change should be measured against
+  # anyway. always() is needed because linux-windows is skipped on the fallback
+  # path, and a skipped dependency would otherwise skip this too — but a matrix
+  # that ran and *failed* must still stop this, or a broken build would be
+  # reported green by testing the published libraries instead.
+  windows-test:
+    name: test ${{ matrix.target }}
+    needs: [linux-windows, windows-libs]
+    if: >-
+      always()
+      && needs.linux-windows.result != 'failure'
+      && needs.linux-windows.result != 'cancelled'
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows_amd64
+            runner: windows_omen
+            cc: C:\mingw64\bin\gcc.exe
+          - target: windows_arm64
+            runner: windows_parallels
+            cc: C:\llvm-mingw\bin\clang.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the freshly built libraries
+        if: needs.linux-windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: libsmod-${{ matrix.target }}
+          path: ${{ runner.temp }}\libs\${{ matrix.target }}
+
+      - name: Download the published libraries
+        if: needs.linux-windows.result != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: libsmod-published-${{ matrix.target }}
+          path: ${{ runner.temp }}\libs\${{ matrix.target }}
+
+      # purego resolves the shared library relative to the working directory.
+      - name: Stage the shared library for purego
+        shell: cmd
+        run: |
+          mkdir internal\libav\dist\${{ matrix.target }}\lib
+          copy /Y "${{ runner.temp }}\libs\${{ matrix.target }}\lib\libgoffmpeg.dll" internal\libav\dist\${{ matrix.target }}\lib\
+
+      - name: Point at the staged libraries
+        shell: cmd
+        run: go mod edit -replace github.com/trendvidia/goffmpeg-libs/${{ matrix.target }}=${{ runner.temp }}\libs\${{ matrix.target }}
+
+      - name: Test (cgo)
+        shell: cmd
+        env:
+          CGO_ENABLED: "1"
+          CC: ${{ matrix.cc }}
+          GOFLAGS: -mod=mod
+        run: go test -count=1 -v ./...
+
+      - name: Test (purego)
+        shell: cmd
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: -mod=mod
+        run: go test -count=1 -v ./...
+
+  linux-arm64:
+    name: linux_arm64
+    needs: should-build
+    if: needs.should-build.outputs.run == 'true'
+    runs-on: [self-hosted, linux_parallels]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch FFmpeg
+        run: |
+          rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
+          git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
+
+      - name: Build linux_arm64
+        run: make dist TARGET=linux_arm64 NPROC=$(nproc)
+
+      # Native platform: build the shared bridge and exercise both backends.
+      # This machine has a v4l2 device, so the capture test runs for real here.
+      - name: Shared bridge
+        run: make bridge-shared TARGET=linux_arm64
+
+      # Without this the tests below link the *published* companion module, not
+      # the FFmpeg this job just built — libav_linux_arm64.go blank-imports
+      # goffmpeg-libs/linux_arm64, and its `#cgo LDFLAGS: -L${SRCDIR}/lib`
+      # resolves into the module cache.
+      #
+      # So this leg built FFmpeg and then tested a different one. Every other
+      # job does the replace for its link check; this is the only one that runs
+      # a real suite, and it was the one missing it. That is how a patch to
+      # FFmpeg could be compiled here (`CC libavdevice/v4l2.o`) and have no
+      # effect on the tests — which is exactly what happened while
+      # investigating #14, and cost a wrong conclusion about patches/0001.
+      - name: Point the tests at the libraries just built
+        run: |
+          rm -rf "$RUNNER_TEMP/libs"
+          git clone --depth 1 https://github.com/trendvidia/goffmpeg-libs.git "$RUNNER_TEMP/libs"
+          make sync-libs TARGET=linux_arm64 LIBS_REPO="$RUNNER_TEMP/libs"
+          go mod edit -replace \
+            github.com/trendvidia/goffmpeg-libs/linux_arm64=$RUNNER_TEMP/libs/linux_arm64
+          # Prove it: the replace must resolve to the clone, not the cache.
+          go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
+            github.com/trendvidia/goffmpeg-libs/linux_arm64
+
+      # The #14 regression, run on its own and verbosely.
+      #
+      # Its own process because it needs the first device open of the process to
+      # be its own — an earlier test opening the same camera would leave the
+      # node in the state the bug is about.
+      #
+      # Verbose because `go test` buffers a package's output and discards it
+      # when the package passes, so a skip and a pass look identical from the
+      # outside. This test skipping when no camera is attached is expected; it
+      # skipping silently while everyone reads the green tick as proof of the
+      # fix is how #14 nearly got closed on a run that never touched a device.
+      - name: Test v4l2 reopen (#14)
+        run: go test -count=1 -v -run TestOpenDeviceV4L2Reopen .
+
+      - name: Test (cgo)
+        run: go test -race -count=1 ./...
+
+      - name: Test (purego)
+        run: CGO_ENABLED=0 go test -count=1 ./...
+
+      # Leave the checkout as it was found; the replace is for this job only.
+      - name: Restore go.mod
+        if: always()
+        run: git checkout go.mod
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libav-linux_arm64
+          path: internal/libav/dist/linux_arm64
+          retention-days: 14
