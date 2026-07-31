@@ -51,13 +51,21 @@ func reportDevices(t *testing.T, format string, devs []DeviceInfo) {
 // cancelled, so it closes the decoder itself if it ever returns.
 func openWithin(t *testing.T, format, url string, d time.Duration) (IDecoder, error) {
 	t.Helper()
+	return openWithinOpts(t, format, url, "", d)
+}
+
+// openWithinOpts is openWithin with per-open device options. Separate because
+// some devices reject the default settings and can only be opened by naming
+// one they support — see TestCaptureSurvivesEmptyReads.
+func openWithinOpts(t *testing.T, format, url, options string, d time.Duration) (IDecoder, error) {
+	t.Helper()
 	type result struct {
 		dec IDecoder
 		err error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		dec, err := OpenDevice(format, url, "")
+		dec, err := OpenDevice(format, url, options)
 		ch <- result{dec, err}
 	}()
 	select {

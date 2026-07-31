@@ -113,11 +113,7 @@ func (d *cgoDecoder) Position() float64 {
 }
 
 func (d *cgoDecoder) Next() (MediaType, error) {
-	res := C.decoder_next(&d.d)
-	if res < 0 {
-		return MediaTypeNone, fmt.Errorf("decoder error: %d", res)
-	}
-	return MediaType(res), nil
+	return nextResult(int(C.decoder_next(&d.d)))
 }
 
 func (d *cgoDecoder) GetRGBA(rgba *image.RGBA) error {

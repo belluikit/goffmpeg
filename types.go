@@ -39,6 +39,17 @@ type IDecoder interface {
 	// decoding starts — rebuilding discards buffered resampler state.
 	// AudioInfo reports the resulting count, which may differ from n.
 	SetAudioChannels(n int) error
+	// Next advances to the next decoded frame and reports which stream it
+	// came from. There are four outcomes, and a live source produces all
+	// four:
+	//
+	//	MediaTypeVideo, nil  a video frame is ready — GetRGBA it
+	//	MediaTypeAudio, nil  an audio frame is ready — GetAudio it
+	//	MediaTypeNone,  nil  end of stream, cleanly
+	//	MediaTypeNone,  err  ErrAgain if no data is ready yet, else a failure
+	//
+	// ErrAgain is not a failure: see its documentation for the loop shape a
+	// capture device needs.
 	Next() (MediaType, error)
 	GetRGBA(rgba *image.RGBA) error
 	GetAudio() ([]byte, error)
@@ -184,6 +195,90 @@ var ErrDeviceListUnavailable = errors.New("goffmpeg: the loaded libgoffmpeg expo
 // It is reported only for a non-empty options string: with no options to lose,
 // OpenWithOptions falls back to the plain entry point and succeeds.
 var ErrOpenOptionsUnavailable = errors.New("goffmpeg: the loaded libgoffmpeg accepts no open options — rebuild the shared library, or build with cgo")
+
+// ErrAgain reports that no data was ready yet and Next should simply be called
+// again. It is neither a failure nor an end of stream.
+//
+// It comes from live capture: a device read non-blockingly answers "no packet
+// yet" with EAGAIN, which on a camera is the ordinary state between frames.
+// Treated as fatal it ends a capture almost immediately — the run in #4 got two
+// frames in ~30ms before the stream was declared over.
+//
+// A capture loop therefore has to distinguish three things:
+//
+//	for {
+//		mt, err := dec.Next()
+//		switch {
+//		case errors.Is(err, ErrAgain):
+//			time.Sleep(5 * time.Millisecond) // nothing yet; see below
+//			continue
+//		case err != nil:
+//			return err // the device really is gone
+//		case mt == MediaTypeNone:
+//			return nil // end of stream
+//		}
+//		// ... mt is MediaTypeVideo or MediaTypeAudio
+//	}
+//
+// The sleep is the caller's to choose and is not optional: Next does not block
+// waiting for a frame, so a bare `continue` busy-waits a core between frames.
+var ErrAgain = errors.New("goffmpeg: no data available yet")
+
+// AVError is an FFmpeg AVERROR code reported by the decoder.
+//
+// It exists so a caller can classify a failure without parsing a formatted
+// string, which used to be the only handle on it (#4):
+//
+//	var averr goffmpeg.AVError
+//	if errors.As(err, &averr) && int(averr) == -16 { /* EBUSY */ }
+//
+// The value is FFmpeg's own convention: an errno-derived code is the negated
+// errno (AVERROR(EBUSY) is -16), and the rest are FFmpeg's packed FFERRTAG
+// constants, which are large negatives.
+type AVError int
+
+func (e AVError) Error() string {
+	// FFERRTAG-packed constants are large negatives; errno-derived ones are
+	// small, and for those the platform can usually name the code.
+	if n := -int(e); n > 0 && n < 1024 {
+		if s := errnoText(n); s != "" {
+			return fmt.Sprintf("goffmpeg: decoder error: %d (%s)", int(e), s)
+		}
+	}
+	if e == avErrorEOF {
+		return fmt.Sprintf("goffmpeg: decoder error: %d (end of file)", int(e))
+	}
+	return fmt.Sprintf("goffmpeg: decoder error: %d", int(e))
+}
+
+// avErrorEOF mirrors AVERROR_EOF, which FFmpeg builds with FFERRTAG('E','O','F',' ').
+// decoder_next maps it to a clean 0 before it reaches Go, so this is only for
+// naming the value if it ever arrives by another route.
+const avErrorEOF AVError = -('E' | 'O'<<8 | 'F'<<16 | ' '<<24)
+
+// goffmpegAgain mirrors GOFFMPEG_AGAIN in bridge.h.
+const goffmpegAgain = 3
+
+// nextResult maps decoder_next's return code onto what Next reports. Both
+// backends go through it so they classify identically — the same reason
+// deviceListError exists.
+func nextResult(res int) (MediaType, error) {
+	// A bridge new enough to know about #4 has already folded EAGAIN into
+	// goffmpegAgain. The raw-code arm below is for purego against an older
+	// prebuilt libgoffmpeg, which returns the bare AVERROR: that backend
+	// dlopens whatever the companion module shipped, so it can be paired
+	// with a bridge predating this fix. Normalising both here means callers
+	// have one thing to check, and errnoEAGAIN is the platform-correct value
+	// on every target (11 on Linux, 35 on macOS).
+	switch {
+	case res == goffmpegAgain, res == -errnoEAGAIN:
+		return MediaTypeNone, ErrAgain
+	case res < 0:
+		return MediaTypeNone, AVError(res)
+	default:
+		return MediaType(res), nil
+	}
+}
 
 // ListInputSources enumerates the capture devices an input device format can
 // see — the programmatic form of `ffmpeg -f dshow -list_devices true -i dummy`.

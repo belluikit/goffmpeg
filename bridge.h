@@ -90,7 +90,19 @@ int decoder_seek(Decoder *d, double seconds);
 // interleaved S16 channels; 0 keeps the stream's native layout. Call before
 // playback begins — rebuilding drops whatever swresample had buffered.
 int decoder_set_audio_channels(Decoder *d, int channels);
-int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, <0=Error
+// GOFFMPEG_AGAIN means no packet was ready yet and decoder_next should be
+// called again. It is not an error and not an end of stream.
+//
+// A live capture device read non-blockingly reports "nothing yet" as
+// AVERROR(EAGAIN) from av_read_frame, and on a camera that is the ordinary
+// state between frames — folding it into the negative error range ended a
+// capture within two frames (#4).
+//
+// The mapping is done here rather than in Go because EAGAIN is platform
+// dependent — 11 on Linux, 35 on macOS — so only the C side, where the errno
+// macro is the right one for the build, can recognise it reliably.
+#define GOFFMPEG_AGAIN 3
+int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, <0=Error
 int decoder_get_rgba(Decoder *d, uint8_t *buffer);
 int decoder_get_audio(Decoder *d, uint8_t **buffer);
 void decoder_close(Decoder *d);

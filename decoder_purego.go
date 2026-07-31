@@ -235,11 +235,7 @@ func (d *puregoDecoder) Position() float64 {
 }
 
 func (d *puregoDecoder) Next() (MediaType, error) {
-	res := int(decoder_next(&d.d))
-	if res < 0 {
-		return MediaTypeNone, fmt.Errorf("decoder error: %d", res)
-	}
-	return MediaType(res), nil
+	return nextResult(int(decoder_next(&d.d)))
 }
 
 func (d *puregoDecoder) GetRGBA(rgba *image.RGBA) error {

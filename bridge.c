@@ -208,7 +208,12 @@ int decoder_next(Decoder *d) {
             av_packet_unref(d->pkt);
         }
     }
-    return (ret == AVERROR_EOF) ? 0 : ret;
+    // The loop above exits only on a negative av_read_frame. EOF is the clean
+    // end of a file; EAGAIN is a non-blocking device saying "not yet" and must
+    // not be confused with either an end or a failure (#4).
+    if (ret == AVERROR_EOF) return 0;
+    if (ret == AVERROR(EAGAIN)) return GOFFMPEG_AGAIN;
+    return ret;
 }
 
 int decoder_get_rgba(Decoder *d, uint8_t *buffer) {
