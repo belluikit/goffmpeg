@@ -210,13 +210,28 @@ func TestListDeviceModesUnknownFormat(t *testing.T) {
 }
 
 // TestDeviceModesRoundTrip is the acceptance test for #5 against real
-// hardware, and the assertion is deliberately the strong one: every mode the
-// device advertises must open with the options that mode renders. Enumeration
-// that cannot be acted on is what the issue was about, so reporting a mode
-// OpenDevice then refuses would be the same bug wearing a different hat.
+// hardware: a mode the device advertises should open with the options that
+// mode renders, because enumeration that cannot be acted on is the bug the
+// issue was about wearing a different hat.
 //
-// It skips without a camera, on the same bargain as the other device tests:
-// whether a camera is present is machine state.
+// What it can assert is narrower than that, though, and the first version got
+// this wrong in both directions. Whether a camera opens *at all* is machine
+// state — the macOS CI runner is a LaunchAgent without camera access, and the
+// Linux runner has a passed-through camera that blocks on open — so a refused
+// open is not by itself evidence of anything. Worse, a blocked open cannot be
+// cancelled and keeps the device, so one such attempt turns every later mode
+// into EBUSY and manufactures a pile of failures from a single machine fact.
+//
+// So the failure it reports is the specific one it can attribute: a mode
+// refused with EINVAL, which is what a wrong option *name* produces —
+// pixel_format=mjpeg on dshow, the real bug found while writing this. A device
+// that opens nothing is a skip, and contention after the first success is
+// logged rather than failed.
+//
+// The gap that leaves: avfoundation collapses every open failure to EIO, so a
+// bad option there is indistinguishable from an absent camera and this test
+// cannot catch it. v4l2 and dshow do report EINVAL, and the local development
+// loop covers macOS.
 func TestDeviceModesRoundTrip(t *testing.T) {
 	format, url := captureTarget(t)
 
@@ -233,31 +248,56 @@ func TestDeviceModesRoundTrip(t *testing.T) {
 		t.Skip("device advertised no modes")
 	}
 
-	// Bounded: a device can advertise dozens, and each open costs a device
-	// acquisition. Four is enough to catch a wrong option name, which is the
-	// failure this guards.
+	// Bounded: a device can advertise dozens and each open costs an
+	// acquisition. Four is enough to cover a raw and a compressed mode, which
+	// is where the option name differs.
 	const maxModes = 4
-	tried := 0
-	for _, m := range modes {
-		if tried >= maxModes {
+	var opened, refused int
+
+	for i, m := range modes {
+		if i >= maxModes {
 			break
 		}
-		tried++
 		opts := m.Options()
 		dec, err := openWithinOpts(t, format, url, opts, openDeviceTimeout)
-		if err != nil {
-			t.Errorf("%s reported mode %s but refused %q: %v\n"+
-				"a mode that cannot be opened is #5 again — the option name or "+
-				"its value does not match what this backend accepts",
+		if err == nil {
+			opened++
+			info := dec.VideoInfo()
+			t.Logf("opened  %-46s -> %dx%d", opts, info.Width, info.Height)
+			dec.Close()
+			continue
+		}
+		refused++
+
+		// EINVAL is the signature of an option this backend will not parse,
+		// which is a fault in what the mode rendered rather than in the
+		// machine. Everything else — a timeout, EBUSY, avfoundation's
+		// catch-all EIO — is the device being unavailable.
+		var averr AVError
+		if errors.As(err, &averr) && int(averr) == -22 {
+			t.Errorf("%s reported mode %s but rejected %q as invalid: %v\n"+
+				"this is #5 again — the option name or its value is not one "+
+				"this backend accepts",
 				format, m, opts, err)
 			continue
 		}
-		info := dec.VideoInfo()
-		t.Logf("%-46s -> %dx%d", opts, info.Width, info.Height)
-		dec.Close()
+
+		t.Logf("skipped %-46s (device unavailable: %v)", opts, err)
+		// A blocked open still holds the device, so every further attempt
+		// would report EBUSY and say nothing about this code.
+		if strings.Contains(err.Error(), "still blocked") {
+			t.Logf("giving up on further modes: the blocked open still holds %q", url)
+			break
+		}
 	}
-	modesVerdict(t, "PASSED — %s %q: %d mode(s) advertised, %d opened with their own options",
-		format, url, len(modes), tried)
+
+	if opened == 0 {
+		modesVerdict(t, "SKIPPED — %s %q: %d mode(s) advertised, none openable here; round trip not exercised",
+			format, url, len(modes))
+		t.Skipf("%s %q advertised %d mode(s), none currently openable", format, url, len(modes))
+	}
+	modesVerdict(t, "PASSED — %s %q: %d mode(s) advertised, %d opened with their own options, %d unavailable",
+		format, url, len(modes), opened, refused)
 }
 
 // TestListDeviceModesNoSuchDevice checks the selector-not-found path on the
