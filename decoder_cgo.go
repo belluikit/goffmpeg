@@ -57,9 +57,10 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 	defer C.free(unsafe.Pointer(cURL))
 	defer C.free(unsafe.Pointer(cOpts))
 
-	res := C.decoder_open_device(&d.d, cFormat, cURL, cOpts)
+	var averr C.int
+	res := C.decoder_open_device_err(&d.d, cFormat, cURL, cOpts, &averr)
 	if res != 0 {
-		return nil, fmt.Errorf("failed to open device %q %q: %d", format, url, int(res))
+		return nil, openDeviceError(format, url, int(res), int(averr))
 	}
 	return d, nil
 }
@@ -90,6 +91,42 @@ func listInputSources(format string) ([]DeviceInfo, error) {
 			MediaKnown:  known,
 			Default:     i == def,
 		})
+	}
+	return out, nil
+}
+
+// listDeviceModes reads the mode list the bridge built, copying each entry out
+// before device_modes_free drops the pixel-format strings it points at — the
+// same ownership rule listInputSources follows.
+func listDeviceModes(format, url string) ([]DeviceMode, error) {
+	cFormat := C.CString(format)
+	cURL := C.CString(url)
+	defer C.free(unsafe.Pointer(cFormat))
+	defer C.free(unsafe.Pointer(cURL))
+
+	var modes unsafe.Pointer
+	if rc := int(C.device_modes_open(cFormat, cURL, &modes)); rc < 0 {
+		return nil, deviceModesError(format, url, rc)
+	}
+	defer C.device_modes_free(modes)
+
+	n := int(C.device_modes_count(modes))
+	out := make([]DeviceMode, 0, n)
+	for i := 0; i < n; i++ {
+		m := DeviceMode{
+			Format: format,
+			Width:  int(C.device_modes_width(modes, C.int(i))),
+			Height: int(C.device_modes_height(modes, C.int(i))),
+			MinFPS: float64(C.device_modes_min_fps(modes, C.int(i))),
+			MaxFPS: float64(C.device_modes_max_fps(modes, C.int(i))),
+		}
+		name := C.GoString(C.device_modes_pixel_format(modes, C.int(i)))
+		if C.device_modes_is_codec(modes, C.int(i)) != 0 {
+			m.Codec = name
+		} else {
+			m.PixelFormat = name
+		}
+		out = append(out, m)
 	}
 	return out, nil
 }

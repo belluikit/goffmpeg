@@ -132,7 +132,9 @@ int decoder_open(Decoder *d, const char *url) {
     return decoder_open_opts(d, url, NULL);
 }
 
-int decoder_open_device(Decoder *d, const char *format, const char *url, const char *options) {
+int decoder_open_device_err(Decoder *d, const char *format, const char *url,
+                            const char *options, int *averr) {
+    if (averr) *averr = 0;
 #ifdef GOFFMPEG_NO_AVDEVICE
     (void)d; (void)format; (void)url; (void)options;
     return -7; // built without libavdevice
@@ -149,10 +151,22 @@ int decoder_open_device(Decoder *d, const char *format, const char *url, const c
     if (options && options[0]) av_dict_parse_string(&opts, options, "=", ",", 0);
     int rc = avformat_open_input(&d->fmt_ctx, url, ifmt, &opts);
     av_dict_free(&opts);
-    if (rc < 0) return -1;
+    if (rc < 0) {
+        // The AVERROR goes out through averr rather than the return value.
+        // This function's own codes occupy -1, -2, -3, -7 and -8, and errno
+        // derived AVERRORs land on exactly those numbers — AVERROR(ENOENT) is
+        // -2, which a device open produces readily — so the two cannot share
+        // one channel without becoming ambiguous (#5).
+        if (averr) *averr = rc;
+        return -1;
+    }
 
     return decoder_setup_streams(d);
 #endif
+}
+
+int decoder_open_device(Decoder *d, const char *format, const char *url, const char *options) {
+    return decoder_open_device_err(d, format, url, options, NULL);
 }
 
 int decoder_seek(Decoder *d, double seconds) {
@@ -304,6 +318,20 @@ int device_list_media_types(void *list, int i) { (void)list; (void)i; return 0; 
 int device_list_default(void *list) { (void)list; return -1; }
 void device_list_free(void *list) { (void)list; }
 
+int device_modes_open(const char *format, const char *url, void **modes) {
+    (void)format; (void)url;
+    if (modes) *modes = NULL;
+    return GOFFMPEG_DEVICE_MODES_NO_AVDEVICE;
+}
+int device_modes_count(void *modes) { (void)modes; return 0; }
+int device_modes_width(void *modes, int i) { (void)modes; (void)i; return 0; }
+int device_modes_height(void *modes, int i) { (void)modes; (void)i; return 0; }
+double device_modes_min_fps(void *modes, int i) { (void)modes; (void)i; return 0; }
+double device_modes_max_fps(void *modes, int i) { (void)modes; (void)i; return 0; }
+const char *device_modes_pixel_format(void *modes, int i) { (void)modes; (void)i; return NULL; }
+int device_modes_is_codec(void *modes, int i) { (void)modes; (void)i; return 0; }
+void device_modes_free(void *modes) { (void)modes; }
+
 #else
 
 // DeviceList pairs libav's list with the media mask computed per device. The
@@ -396,6 +424,183 @@ static int v4l2_media_mask(const char *node) {
     close(fd);
     return mask;
 }
+
+// v4l2_pixfmt_name maps a V4L2 fourcc to the name v4l2's pixel_format option
+// takes, mirroring ff_fmt_conversion_table in FFmpeg's v4l2-common.c.
+//
+// Mirroring rather than inventing is the whole point: the option is resolved
+// against that table, so a name outside it is one OpenDevice would reject, and
+// DeviceMode.Options() would then hand back a mode that cannot be opened.
+//
+// Compressed formats come back as codec names ("mjpeg", "h264") rather than
+// pixel formats. That is not a special case for the caller: v4l2 declares
+// pixel_format and input_format at the same struct offset and resolves either
+// as a codec descriptor first and a pixel format second, so one option name
+// carries both.
+//
+// The #ifdefs mirror the table's own, since these fourccs appeared in
+// videodev2.h at different times and the build's kernel headers set the floor.
+static const char *v4l2_pixfmt_name(uint32_t f) {
+    switch (f) {
+        case V4L2_PIX_FMT_YUV420:  return "yuv420p";
+        case V4L2_PIX_FMT_YVU420:  return "yuv420p";
+        case V4L2_PIX_FMT_YUV422P: return "yuv422p";
+        case V4L2_PIX_FMT_YUYV:    return "yuyv422";
+        case V4L2_PIX_FMT_UYVY:    return "uyvy422";
+        case V4L2_PIX_FMT_YUV411P: return "yuv411p";
+        case V4L2_PIX_FMT_YUV410:  return "yuv410p";
+        case V4L2_PIX_FMT_YVU410:  return "yuv410p";
+        case V4L2_PIX_FMT_RGB555:  return "rgb555le";
+        case V4L2_PIX_FMT_RGB555X: return "rgb555be";
+        case V4L2_PIX_FMT_RGB565:  return "rgb565le";
+        case V4L2_PIX_FMT_RGB565X: return "rgb565be";
+        case V4L2_PIX_FMT_BGR24:   return "bgr24";
+        case V4L2_PIX_FMT_RGB24:   return "rgb24";
+#ifdef V4L2_PIX_FMT_XBGR32
+        case V4L2_PIX_FMT_XBGR32:  return "bgr0";
+        case V4L2_PIX_FMT_XRGB32:  return "0rgb";
+        case V4L2_PIX_FMT_ABGR32:  return "bgra";
+        case V4L2_PIX_FMT_ARGB32:  return "argb";
+#endif
+        case V4L2_PIX_FMT_BGR32:   return "bgr0";
+        case V4L2_PIX_FMT_RGB32:   return "0rgb";
+        case V4L2_PIX_FMT_GREY:    return "gray";
+#ifdef V4L2_PIX_FMT_Y16
+        case V4L2_PIX_FMT_Y16:     return "gray16le";
+#endif
+        case V4L2_PIX_FMT_NV12:    return "nv12";
+#ifdef V4L2_PIX_FMT_NV16
+        case V4L2_PIX_FMT_NV16:    return "nv16";
+#endif
+#ifdef V4L2_PIX_FMT_NV24
+        case V4L2_PIX_FMT_NV24:    return "nv24";
+#endif
+        case V4L2_PIX_FMT_MJPEG:   return "mjpeg";
+        case V4L2_PIX_FMT_JPEG:    return "mjpeg";
+#ifdef V4L2_PIX_FMT_H264
+        case V4L2_PIX_FMT_H264:    return "h264";
+#endif
+#ifdef V4L2_PIX_FMT_MPEG4
+        case V4L2_PIX_FMT_MPEG4:   return "mpeg4";
+#endif
+        default:                   return NULL;
+    }
+}
+
+// v4l2_pixfmt_is_codec says whether v4l2_pixfmt_name returned a decoder name
+// rather than a pixel layout. The rows of ff_fmt_conversion_table carrying a
+// codec_id are exactly these, and v4l2 resolves pixel_format as a codec
+// descriptor before a pixel format, so one option name still carries both.
+static int v4l2_pixfmt_is_codec(uint32_t f) {
+    switch (f) {
+        case V4L2_PIX_FMT_MJPEG:
+        case V4L2_PIX_FMT_JPEG:
+#ifdef V4L2_PIX_FMT_H264
+        case V4L2_PIX_FMT_H264:
+#endif
+#ifdef V4L2_PIX_FMT_MPEG4
+        case V4L2_PIX_FMT_MPEG4:
+#endif
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// v4l2_collect_intervals adds one entry per framerate the node offers for this
+// size, or a single rate-less entry when it offers none.
+//
+// A v4l2 interval is time per frame, so the framerate is its reciprocal and
+// the *smallest* interval is the *highest* rate — which is why the stepwise
+// bounds cross over on the way out.
+static void v4l2_collect_intervals(int fd, void *modes, uint32_t pixfmt,
+                                   int w, int h, const char *name, int is_codec) {
+    struct v4l2_frmivalenum fi;
+    unsigned int found = 0;
+
+    for (unsigned int i = 0;; i++) {
+        memset(&fi, 0, sizeof(fi));
+        fi.index = i;
+        fi.pixel_format = pixfmt;
+        fi.width = (unsigned int)w;
+        fi.height = (unsigned int)h;
+        if (ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &fi) != 0) break;
+        found++;
+
+        if (fi.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
+            if (fi.discrete.numerator == 0) continue;
+            double fps = (double)fi.discrete.denominator / (double)fi.discrete.numerator;
+            device_modes_append(modes, w, h, fps, fps, name, is_codec);
+            continue;
+        }
+
+        // Stepwise and continuous are one entry describing a whole range.
+        double lo = 0, hi = 0;
+        if (fi.stepwise.max.denominator && fi.stepwise.max.numerator)
+            lo = (double)fi.stepwise.max.denominator / (double)fi.stepwise.max.numerator;
+        if (fi.stepwise.min.denominator && fi.stepwise.min.numerator)
+            hi = (double)fi.stepwise.min.denominator / (double)fi.stepwise.min.numerator;
+        device_modes_append(modes, w, h, lo, hi, name, is_codec);
+        break;
+    }
+
+    // Some drivers implement neither interval ioctl — a VM's virtual camera is
+    // the case seen here. The size is still real and worth reporting; 0fps is
+    // documented as "not reported" rather than "zero".
+    if (found == 0) device_modes_append(modes, w, h, 0, 0, name, is_codec);
+}
+
+// v4l2_collect_modes walks the node's formats, then each format's frame sizes,
+// then each size's intervals — the three-level enumeration v4l2 requires.
+static int v4l2_collect_modes(const char *node, void *modes) {
+    if (!node) return GOFFMPEG_DEVICE_MODES_NO_DEVICE;
+
+    // Same open as v4l2_media_mask: non-blocking so a metadata node cannot
+    // wedge the caller, and read/write because some drivers refuse O_RDONLY.
+    int fd = open(node, O_RDWR | O_NONBLOCK);
+    if (fd < 0) return GOFFMPEG_DEVICE_MODES_NO_DEVICE;
+
+    for (unsigned int fi = 0;; fi++) {
+        struct v4l2_fmtdesc fmt;
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.index = fi;
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) != 0) break;
+
+        const char *name = v4l2_pixfmt_name(fmt.pixelformat);
+        int is_codec = v4l2_pixfmt_is_codec(fmt.pixelformat);
+
+        for (unsigned int si = 0;; si++) {
+            struct v4l2_frmsizeenum fs;
+            memset(&fs, 0, sizeof(fs));
+            fs.index = si;
+            fs.pixel_format = fmt.pixelformat;
+            if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &fs) != 0) break;
+
+            if (fs.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                v4l2_collect_intervals(fd, modes, fmt.pixelformat,
+                                       (int)fs.discrete.width,
+                                       (int)fs.discrete.height, name, is_codec);
+                continue;
+            }
+
+            // Stepwise and continuous describe a range in one entry, so there
+            // is no list to walk. Both endpoints are reported: any size
+            // between them is valid, and the endpoints are what a caller
+            // picking a mode can actually name.
+            v4l2_collect_intervals(fd, modes, fmt.pixelformat,
+                                   (int)fs.stepwise.max_width,
+                                   (int)fs.stepwise.max_height, name, is_codec);
+            v4l2_collect_intervals(fd, modes, fmt.pixelformat,
+                                   (int)fs.stepwise.min_width,
+                                   (int)fs.stepwise.min_height, name, is_codec);
+            break;
+        }
+    }
+
+    close(fd);
+    return 0;
+}
 #endif
 
 int device_list_open(const char *format, void **list) {
@@ -485,6 +690,396 @@ void device_list_free(void *list) {
     if (dl->list) avdevice_free_list_devices(&dl->list);
     av_free(dl->media);
     av_free(dl);
+}
+
+#ifdef _WIN32
+// DirectShow capture-mode enumeration.
+//
+// COBJMACROS before dshow.h is what gives the IFoo_Method(p, ...) spellings;
+// without it these interfaces are only usable from C++. FFmpeg's own dshow.c
+// does the same, and the GUIDs come from -lstrmiids, which the Windows link
+// already pulls in for libavdevice.
+#define COBJMACROS
+#include <dshow.h>
+// VIDEOINFOHEADER2 and FORMAT_VideoInfo2 are declared here rather than in
+// dshow.h under mingw, and the interlaced/aspect-aware header is the one a
+// modern camera reports its formats through.
+#include <dvdmedia.h>
+#include <math.h>
+
+// dshow_subtype_name maps a media subtype to the name dshow's pixel_format or
+// vcodec option takes.
+//
+// The subtype GUIDs are FOURCCs in Data1 for everything except the RGB
+// entries, which have their own MEDIASUBTYPE_RGBxx constants, so the switch is
+// on Data1 with the RGB cases spelled out. As with the other two backends the
+// names mirror what the demuxer will accept rather than what the hardware
+// calls the layout, because a name outside that set is one OpenDevice refuses.
+static const char *dshow_subtype_name(const GUID *sub) {
+    if (IsEqualGUID(sub, &MEDIASUBTYPE_RGB24))   return "bgr24";
+    if (IsEqualGUID(sub, &MEDIASUBTYPE_RGB32))   return "bgr0";
+    if (IsEqualGUID(sub, &MEDIASUBTYPE_RGB555))  return "rgb555le";
+    if (IsEqualGUID(sub, &MEDIASUBTYPE_RGB565))  return "rgb565le";
+    if (IsEqualGUID(sub, &MEDIASUBTYPE_RGB8))    return "gray";
+
+    switch (sub->Data1) {
+        case MKTAG('Y','U','Y','2'): return "yuyv422";
+        case MKTAG('U','Y','V','Y'): return "uyvy422";
+        case MKTAG('Y','V','1','2'): return "yuv420p";
+        case MKTAG('I','4','2','0'): return "yuv420p";
+        case MKTAG('I','Y','U','V'): return "yuv420p";
+        case MKTAG('N','V','1','2'): return "nv12";
+        case MKTAG('Y','4','1','P'): return "yuv411p";
+        case MKTAG('Y','V','U','9'): return "yuv410p";
+        case MKTAG('Y','8','0','0'): return "gray";
+        case MKTAG('G','R','E','Y'): return "gray";
+        // Compressed subtypes name a decoder rather than a layout. dshow takes
+        // these through vcodec= instead of pixel_format=, which is why
+        // DeviceMode.Options() has to know which kind it is holding.
+        case MKTAG('M','J','P','G'): return "mjpeg";
+        case MKTAG('H','2','6','4'): return "h264";
+        case MKTAG('h','2','6','4'): return "h264";
+        case MKTAG('H','E','V','C'): return "hevc";
+        default:                     return NULL;
+    }
+}
+
+// dshow_subtype_is_codec says whether dshow_subtype_name returned a decoder
+// name. It matters more here than on v4l2: dshow keeps pixel_format and vcodec
+// as separate options and validates pixel_format strictly as a pixel layout,
+// so offering "mjpeg" there is rejected outright rather than reinterpreted.
+static int dshow_subtype_is_codec(const GUID *sub) {
+    switch (sub->Data1) {
+        case MKTAG('M','J','P','G'):
+        case MKTAG('H','2','6','4'):
+        case MKTAG('h','2','6','4'):
+        case MKTAG('H','E','V','C'):
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// dshow_moniker_matches compares one enumerated device against the selector.
+//
+// The caller's url is a dshow name with its "video=" prefix already stripped
+// by the Go side. Both the friendly name and the device path are accepted,
+// because device_list_name reports the path — a camera's unique identity —
+// while a human-written selector is usually the friendly name.
+static int dshow_moniker_matches(IMoniker *m, const char *want) {
+    IPropertyBag *bag = NULL;
+    int matched = 0;
+
+    // The moniker display name first, because that is what device_list_name
+    // reports — libavdevice lists dshow devices by it, so a caller feeding a
+    // DeviceInfo.Name straight back in arrives with an "@device_pnp_..."
+    // string that matches neither of the property-bag keys below.
+    //
+    // The colon substitution is not cosmetic. The moniker's own display name
+    // is "@device:pnp:\\?\usb#...", and libavdevice rewrites every ':' to '_'
+    // because it uses ':' to delimit its own source syntax. Comparing against
+    // the raw name therefore never matches the name it handed the caller.
+    {
+        LPOLESTR display = NULL;
+        if (IMoniker_GetDisplayName(m, NULL, NULL, &display) == S_OK && display) {
+            char buf[1024];
+            int n = WideCharToMultiByte(CP_UTF8, 0, display, -1, buf, sizeof(buf), NULL, NULL);
+            if (n > 0) {
+                for (char *p = buf; *p; p++) {
+                    if (*p == ':') *p = '_';
+                }
+                if (!strcmp(buf, want)) matched = 1;
+            }
+            CoTaskMemFree(display);
+        }
+    }
+    if (matched) return 1;
+
+    if (IMoniker_BindToStorage(m, NULL, NULL, &IID_IPropertyBag, (void **)&bag) != S_OK)
+        return 0;
+
+    const wchar_t *keys[] = { L"FriendlyName", L"DevicePath" };
+    for (int k = 0; k < 2 && !matched; k++) {
+        VARIANT v;
+        VariantInit(&v);
+        if (IPropertyBag_Read(bag, keys[k], &v, NULL) != S_OK) continue;
+        if (v.vt == VT_BSTR && v.bstrVal) {
+            char buf[512];
+            int n = WideCharToMultiByte(CP_UTF8, 0, v.bstrVal, -1, buf, sizeof(buf), NULL, NULL);
+            if (n > 0 && !strcmp(buf, want)) matched = 1;
+        }
+        VariantClear(&v);
+    }
+    IPropertyBag_Release(bag);
+    return matched;
+}
+
+// dshow_collect_from_pin reads one output pin's capability list.
+static void dshow_collect_from_pin(IPin *pin, void *modes) {
+    IAMStreamConfig *config = NULL;
+    int count = 0, size = 0;
+
+    if (IPin_QueryInterface(pin, &IID_IAMStreamConfig, (void **)&config) != S_OK) return;
+    if (IAMStreamConfig_GetNumberOfCapabilities(config, &count, &size) != S_OK ||
+        size != (int)sizeof(VIDEO_STREAM_CONFIG_CAPS)) {
+        // A non-video pin reports a differently sized caps struct; reading it
+        // as VIDEO_STREAM_CONFIG_CAPS would be a type confusion, so skip.
+        IAMStreamConfig_Release(config);
+        return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        AM_MEDIA_TYPE *mt = NULL;
+        VIDEO_STREAM_CONFIG_CAPS caps;
+        if (IAMStreamConfig_GetStreamCaps(config, i, &mt, (BYTE *)&caps) != S_OK) continue;
+        if (!mt) continue;
+
+        BITMAPINFOHEADER *bih = NULL;
+        if (IsEqualGUID(&mt->formattype, &FORMAT_VideoInfo) && mt->pbFormat) {
+            bih = &((VIDEOINFOHEADER *)mt->pbFormat)->bmiHeader;
+        } else if (IsEqualGUID(&mt->formattype, &FORMAT_VideoInfo2) && mt->pbFormat) {
+            bih = &((VIDEOINFOHEADER2 *)mt->pbFormat)->bmiHeader;
+        }
+
+        if (bih) {
+            // A frame interval is 100ns units per frame, so the framerate is
+            // its reciprocal and the bounds cross over: the *minimum* interval
+            // is the *maximum* rate.
+            //
+            // Rounded because the unit quantises: 60fps is stored as 166666,
+            // which inverts to 60.000240000960005 and would be reported — and
+            // put into an options string — in that form. v4l2 and avfoundation
+            // report exact rationals and need no such correction. Three
+            // decimals is enough to keep 29.97 and 23.976 intact while
+            // absorbing the quantisation.
+            double min_fps = 0, max_fps = 0;
+            if (caps.MaxFrameInterval > 0)
+                min_fps = round(10000000.0 / (double)caps.MaxFrameInterval * 1000.0) / 1000.0;
+            if (caps.MinFrameInterval > 0)
+                max_fps = round(10000000.0 / (double)caps.MinFrameInterval * 1000.0) / 1000.0;
+
+            int h = bih->biHeight < 0 ? -bih->biHeight : bih->biHeight; // may be bottom-up
+            device_modes_append(modes, bih->biWidth, h, min_fps, max_fps,
+                                dshow_subtype_name(&mt->subtype),
+                                dshow_subtype_is_codec(&mt->subtype));
+        }
+
+        // AM_MEDIA_TYPE is caller-owned and holds two nested allocations.
+        if (mt->pbFormat && mt->cbFormat) CoTaskMemFree(mt->pbFormat);
+        if (mt->pUnk) IUnknown_Release(mt->pUnk);
+        CoTaskMemFree(mt);
+    }
+    IAMStreamConfig_Release(config);
+}
+
+static int dshow_collect_modes(const char *url, void *modes) {
+    // The Go side hands the same selector OpenDevice takes, "video=<name>";
+    // the prefix is dshow's own url syntax and means nothing to the enumerator.
+    const char *want = url;
+    if (!strncmp(want, "video=", 6)) want += 6;
+    else if (!strncmp(want, "audio=", 6)) return GOFFMPEG_DEVICE_MODES_NO_DEVICE;
+    if (!want[0]) return GOFFMPEG_DEVICE_MODES_NO_DEVICE;
+
+    // Balanced by CoUninitialize below. RPC_E_CHANGED_MODE means the thread is
+    // already apartment-initialised by someone else, which is fine to work in
+    // but must not be undone here.
+    HRESULT init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    int owns_com = (init == S_OK || init == S_FALSE);
+
+    ICreateDevEnum *devenum = NULL;
+    IEnumMoniker *classenum = NULL;
+    IMoniker *m = NULL;
+    int rc = GOFFMPEG_DEVICE_MODES_NO_DEVICE;
+
+    if (CoCreateInstance(&CLSID_SystemDeviceEnum, NULL, CLSCTX_INPROC_SERVER,
+                         &IID_ICreateDevEnum, (void **)&devenum) != S_OK) {
+        rc = GOFFMPEG_DEVICE_MODES_FAILED;
+        goto done;
+    }
+    // S_FALSE means the category exists but is empty, and leaves classenum
+    // NULL — a host with no camera rather than a fault.
+    if (ICreateDevEnum_CreateClassEnumerator(devenum, &CLSID_VideoInputDeviceCategory,
+                                             &classenum, 0) != S_OK || !classenum) {
+        goto done;
+    }
+
+    while (IEnumMoniker_Next(classenum, 1, &m, NULL) == S_OK) {
+        if (!dshow_moniker_matches(m, want)) {
+            IMoniker_Release(m);
+            m = NULL;
+            continue;
+        }
+
+        IBaseFilter *filter = NULL;
+        if (IMoniker_BindToObject(m, NULL, NULL, &IID_IBaseFilter, (void **)&filter) == S_OK) {
+            IEnumPins *pins = NULL;
+            if (IBaseFilter_EnumPins(filter, &pins) == S_OK) {
+                IPin *pin = NULL;
+                while (IEnumPins_Next(pins, 1, &pin, NULL) == S_OK) {
+                    PIN_DIRECTION dir;
+                    if (IPin_QueryDirection(pin, &dir) == S_OK && dir == PINDIR_OUTPUT) {
+                        dshow_collect_from_pin(pin, modes);
+                    }
+                    IPin_Release(pin);
+                }
+                IEnumPins_Release(pins);
+            }
+            IBaseFilter_Release(filter);
+            rc = 0; // the device was found and bound, even if it listed nothing
+        }
+        IMoniker_Release(m);
+        m = NULL;
+        break;
+    }
+
+done:
+    if (classenum) IEnumMoniker_Release(classenum);
+    if (devenum) ICreateDevEnum_Release(devenum);
+    if (owns_com) CoUninitialize();
+    return rc;
+}
+#endif // _WIN32
+
+// ---------------------------------------------------------------------------
+// Capture-mode enumeration (see bridge.h).
+//
+// The list handling lives here and the per-backend queries fill it through
+// device_modes_append, so the ObjC translation unit and the ioctl and COM code
+// share one allocator and one deduplication rule rather than three.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    int width, height;
+    double min_fps, max_fps;
+    char pixfmt[24]; // libav's name where known; see device_modes_pixel_format
+    int is_codec;    // pixfmt names a decoder, not a layout
+} ModeEntry;
+
+typedef struct {
+    ModeEntry *items;
+    int count, cap;
+} ModeList;
+
+int device_modes_append(void *modes, int width, int height,
+                        double min_fps, double max_fps, const char *pixfmt,
+                        int is_codec) {
+    ModeList *ml = (ModeList *)modes;
+    if (!ml || width <= 0 || height <= 0) return -1;
+
+    // Backends repeat themselves: v4l2 reports the same frame size once per
+    // pixel format and once per interval, and avfoundation lists a format per
+    // range. Identical entries are noise to a caller choosing a mode, so they
+    // are dropped here rather than in each backend. The lists are tens of
+    // entries, so a linear scan costs nothing worth avoiding.
+    for (int i = 0; i < ml->count; i++) {
+        ModeEntry *e = &ml->items[i];
+        if (e->width == width && e->height == height &&
+            e->min_fps == min_fps && e->max_fps == max_fps &&
+            e->is_codec == is_codec &&
+            !strcmp(e->pixfmt, pixfmt ? pixfmt : "")) {
+            return 0;
+        }
+    }
+
+    if (ml->count == ml->cap) {
+        int cap = ml->cap ? ml->cap * 2 : 16;
+        ModeEntry *grown = av_realloc_array(ml->items, (size_t)cap, sizeof(ModeEntry));
+        if (!grown) return -1;
+        ml->items = grown;
+        ml->cap = cap;
+    }
+
+    ModeEntry *e = &ml->items[ml->count];
+    memset(e, 0, sizeof(*e));
+    e->width = width;
+    e->height = height;
+    e->min_fps = min_fps;
+    e->max_fps = max_fps;
+    e->is_codec = is_codec;
+    if (pixfmt) snprintf(e->pixfmt, sizeof(e->pixfmt), "%s", pixfmt);
+    ml->count++;
+    return 0;
+}
+
+static ModeEntry *mode_at(void *modes, int i) {
+    ModeList *ml = (ModeList *)modes;
+    if (!ml || !ml->items || i < 0 || i >= ml->count) return NULL;
+    return &ml->items[i];
+}
+
+int device_modes_count(void *modes) {
+    ModeList *ml = (ModeList *)modes;
+    return ml ? ml->count : 0;
+}
+
+int device_modes_width(void *modes, int i) {
+    ModeEntry *e = mode_at(modes, i);
+    return e ? e->width : 0;
+}
+
+int device_modes_height(void *modes, int i) {
+    ModeEntry *e = mode_at(modes, i);
+    return e ? e->height : 0;
+}
+
+double device_modes_min_fps(void *modes, int i) {
+    ModeEntry *e = mode_at(modes, i);
+    return e ? e->min_fps : 0;
+}
+
+double device_modes_max_fps(void *modes, int i) {
+    ModeEntry *e = mode_at(modes, i);
+    return e ? e->max_fps : 0;
+}
+
+const char *device_modes_pixel_format(void *modes, int i) {
+    ModeEntry *e = mode_at(modes, i);
+    if (!e || !e->pixfmt[0]) return NULL;
+    return e->pixfmt;
+}
+
+int device_modes_is_codec(void *modes, int i) {
+    ModeEntry *e = mode_at(modes, i);
+    return (e && e->is_codec) ? 1 : 0;
+}
+
+void device_modes_free(void *modes) {
+    ModeList *ml = (ModeList *)modes;
+    if (!ml) return;
+    av_free(ml->items);
+    av_free(ml);
+}
+
+int device_modes_open(const char *format, const char *url, void **modes) {
+    if (!modes) return GOFFMPEG_DEVICE_MODES_FAILED;
+    *modes = NULL;
+    if (!format || !url) return GOFFMPEG_DEVICE_MODES_FAILED;
+
+    // The format still has to exist, so an unknown one is the same answer here
+    // as it is from device_list_open rather than a bare "unsupported".
+    avdevice_register_all();
+    if (!av_find_input_format(format)) return GOFFMPEG_DEVICE_MODES_NO_FORMAT;
+
+    ModeList *ml = av_mallocz(sizeof(ModeList));
+    if (!ml) return GOFFMPEG_DEVICE_MODES_FAILED;
+
+    int rc = GOFFMPEG_DEVICE_MODES_UNSUPPORTED;
+#ifdef __linux__
+    if (!strcmp(format, "v4l2")) rc = v4l2_collect_modes(url, ml);
+#endif
+#ifdef __APPLE__
+    if (!strcmp(format, "avfoundation")) rc = goffmpeg_avf_collect_modes(url, ml);
+#endif
+#ifdef _WIN32
+    if (!strcmp(format, "dshow")) rc = dshow_collect_modes(url, ml);
+#endif
+
+    if (rc < 0) {
+        device_modes_free(ml);
+        return rc;
+    }
+    *modes = ml;
+    return ml->count;
 }
 
 #endif

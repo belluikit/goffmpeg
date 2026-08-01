@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -212,14 +213,26 @@ func captureTarget(t *testing.T) (format, url string) {
 		if err != nil {
 			t.Skipf("ListInputSources(v4l2): %v", err)
 		}
+		// Metadata nodes enumerate like any other and block forever when
+		// opened, so the HasMedia filter is load-bearing.
+		var video []DeviceInfo
 		for _, d := range devs {
-			// Metadata nodes enumerate like any other and block forever
-			// when opened, so this filter is load-bearing.
 			if d.HasMedia(MediaTypeVideo) {
 				if _, err := os.Stat(d.Name); err == nil {
-					return "v4l2", d.Name
+					video = append(video, d)
 				}
 			}
+		}
+		// Lowest node number first, as TestOpenDeviceV4L2Reopen already does.
+		// Enumeration order is not preference order, and on the CI runner the
+		// higher-numbered node is a camera passed through from the host that
+		// blocks on open — picking it wasted the whole test and then held the
+		// device long enough to make the next attempts fail with EBUSY.
+		sort.SliceStable(video, func(i, j int) bool {
+			return v4l2NodeNumber(video[i].Name) < v4l2NodeNumber(video[j].Name)
+		})
+		if len(video) > 0 {
+			return "v4l2", video[0].Name
 		}
 		t.Skip("no v4l2 video-capture devices on this host")
 	case "windows":

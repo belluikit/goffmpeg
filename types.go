@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"strconv"
+	"strings"
 )
 
 type MediaType int
@@ -301,6 +303,41 @@ func nextResult(res int) (MediaType, error) {
 	}
 }
 
+// openDeviceError maps the bridge's device-open result onto a Go error. Shared
+// by both backends so they fail identically, as deviceListError already is.
+//
+// rc is the bridge's own code; averr is the AVERROR from avformat_open_input,
+// or 0 when there was none to report — which is also what an older purego
+// libgoffmpeg gives, since it predates the out-param entirely.
+//
+// There is deliberately no "the device refused this configuration" sentinel
+// here, because libavdevice does not preserve enough to build an honest one.
+// Only v4l2 propagates the real errno from the ioctl that refused. avfoundation
+// discards it — add_video_device's return is tested for truthiness and thrown
+// away, so its fail path answers AVERROR(EIO) for a rejected framerate and for
+// "no capture device found" alike — and dshow answers EIO for nearly
+// everything too. A sentinel keyed on EIO would fire on unrelated failures, and
+// one keyed on EINVAL would never fire at all on the backend #5 was reported
+// against. ListDeviceModes is the reliable answer to "what would this device
+// accept"; the AVERROR here is the honest amount of detail about why the open
+// failed.
+func openDeviceError(format, url string, rc, averr int) error {
+	switch {
+	case rc == -3:
+		return fmt.Errorf("goffmpeg: unknown input format %q", format)
+	case rc == -7:
+		return errors.New("goffmpeg: built without libavdevice")
+	case rc == -2:
+		return fmt.Errorf("goffmpeg: opened device %q %q, but could not read its streams", format, url)
+	case averr != 0:
+		return fmt.Errorf("goffmpeg: opening device %q %q: %w", format, url, AVError(averr))
+	default:
+		// No AVERROR to report: either the failure was not an open failure, or
+		// the loaded bridge predates decoder_open_device_err.
+		return fmt.Errorf("goffmpeg: opening device %q %q failed: %d", format, url, rc)
+	}
+}
+
 // ListInputSources enumerates the capture devices an input device format can
 // see — the programmatic form of `ffmpeg -f dshow -list_devices true -i dummy`.
 //
@@ -315,6 +352,140 @@ func nextResult(res int) (MediaType, error) {
 // successful call with no devices is an empty slice and a nil error.
 func ListInputSources(format string) ([]DeviceInfo, error) {
 	return listInputSources(format)
+}
+
+// DeviceMode is one configuration a capture device will accept.
+type DeviceMode struct {
+	// Format is the input format this mode came from — "v4l2", "dshow",
+	// "avfoundation". Options needs it: the option that selects a compressed
+	// format is not spelled the same on every backend.
+	Format string
+	Width  int
+	Height int
+	// MinFPS and MaxFPS bound the framerates this mode supports. They are
+	// equal for a fixed-rate mode, and both 0 when the backend reported no
+	// rate — v4l2 does that for a driver without VIDIOC_ENUM_FRAMEINTERVALS.
+	// A range is kept as a range because that is what the hardware says:
+	// flattening 1–60fps into sixty modes would invent entries.
+	MinFPS float64
+	MaxFPS float64
+	// PixelFormat is libav's name for the raw layout ("nv12", "yuyv422").
+	// Empty when the mode is compressed, or when the device's format has no
+	// libav equivalent — the mode is still usable, just not by that name.
+	PixelFormat string
+	// Codec is set instead of PixelFormat when the device delivers the mode
+	// compressed ("mjpeg", "h264"). At most one of the two is ever set.
+	//
+	// They are separate fields because the distinction is not cosmetic:
+	// dshow validates pixel_format strictly as a pixel layout and rejects
+	// "mjpeg" outright, so the two need different options. v4l2 happens to
+	// accept either through one option, and avfoundation never delivers
+	// compressed at all.
+	Codec string
+}
+
+// Options renders the mode as an options string OpenDevice accepts:
+//
+//	video_size=1920x1080,framerate=60,pixel_format=nv12
+//
+// The framerate is MaxFPS, the fastest the mode allows; a caller wanting a
+// different rate within the range should build the string itself. Fields the
+// device did not report are left out rather than guessed at.
+func (m DeviceMode) Options() string {
+	var parts []string
+	if m.Width > 0 && m.Height > 0 {
+		parts = append(parts, fmt.Sprintf("video_size=%dx%d", m.Width, m.Height))
+	}
+	if m.MaxFPS > 0 {
+		parts = append(parts, "framerate="+strconv.FormatFloat(m.MaxFPS, 'g', -1, 64))
+	}
+	switch {
+	case m.Codec != "":
+		// dshow keeps these apart; v4l2 resolves pixel_format as a codec
+		// descriptor before a pixel format, so one name serves both there.
+		if m.Format == "dshow" {
+			parts = append(parts, "vcodec="+m.Codec)
+		} else {
+			parts = append(parts, "pixel_format="+m.Codec)
+		}
+	case m.PixelFormat != "":
+		parts = append(parts, "pixel_format="+m.PixelFormat)
+	}
+	return strings.Join(parts, ",")
+}
+
+// String renders the mode the way FFmpeg prints its "Supported modes" list.
+func (m DeviceMode) String() string {
+	s := fmt.Sprintf("%dx%d", m.Width, m.Height)
+	if m.MaxFPS > 0 {
+		if m.MinFPS == m.MaxFPS {
+			s += fmt.Sprintf("@%gfps", m.MaxFPS)
+		} else {
+			s += fmt.Sprintf("@[%g %g]fps", m.MinFPS, m.MaxFPS)
+		}
+	}
+	if m.PixelFormat != "" {
+		s += " " + m.PixelFormat
+	} else if m.Codec != "" {
+		s += " " + m.Codec
+	}
+	return s
+}
+
+// ErrDeviceModesUnsupported is returned by ListDeviceModes for a format with
+// no mode query behind it. Every format libavdevice offers is in this position
+// by default: none of avfoundation, v4l2 or dshow implements FFmpeg's
+// create_device_capabilities, so each supported backend is queried natively,
+// and one that has not been written yet says so here.
+var ErrDeviceModesUnsupported = errors.New("goffmpeg: no capture-mode query for this input format")
+
+// ErrDeviceModesUnavailable is the purego counterpart of
+// ErrDeviceListUnavailable: the loaded libgoffmpeg predates mode enumeration
+// and exports none of the symbols. Rebuild the shared library, or use cgo.
+var ErrDeviceModesUnavailable = errors.New("goffmpeg: the loaded libgoffmpeg exports no capture-mode query — rebuild the shared library, or build with cgo")
+
+// ErrDeviceNotFound is returned by ListDeviceModes when the selector names no
+// device it can reach — a v4l2 node that does not exist or cannot be opened,
+// an avfoundation index past the end of the camera list.
+var ErrDeviceNotFound = errors.New("goffmpeg: no such capture device")
+
+// ListDeviceModes reports the configurations one capture device will accept.
+//
+// It answers the question a failed OpenDevice cannot: libavdevice knows what
+// the device supports, prints it to the log, and then fails with a code that
+// carries none of it (#5). Rather than guess at a framerate the device might
+// take, ask:
+//
+//	modes, err := goffmpeg.ListDeviceModes("avfoundation", "0")
+//	if err == nil && len(modes) > 0 {
+//		dec, err = goffmpeg.OpenDevice("avfoundation", "0", modes[0].Options())
+//	}
+//
+// url is the same selector OpenDevice takes: "0" under avfoundation,
+// "/dev/video0" under v4l2, a "video=<name>" under dshow.
+//
+// A device that opens but advertises nothing is an empty slice and a nil
+// error. Returns ErrDeviceModesUnsupported for a format with no query behind
+// it, and ErrDeviceNotFound when the selector matches no device.
+func ListDeviceModes(format, url string) ([]DeviceMode, error) {
+	return listDeviceModes(format, url)
+}
+
+// deviceModesError maps the bridge's GOFFMPEG_DEVICE_MODES_* codes onto Go
+// errors. Shared by both backends, as deviceListError is.
+func deviceModesError(format, url string, rc int) error {
+	switch rc {
+	case -2:
+		return fmt.Errorf("goffmpeg: unknown input format %q", format)
+	case -3:
+		return ErrDeviceModesUnsupported
+	case -4:
+		return errors.New("goffmpeg: built without libavdevice")
+	case -5:
+		return fmt.Errorf("goffmpeg: %q %q: %w", format, url, ErrDeviceNotFound)
+	default:
+		return fmt.Errorf("goffmpeg: querying %q %q modes failed: %d", format, url, rc)
+	}
 }
 
 // deviceListError maps the bridge's GOFFMPEG_DEVICE_LIST_* codes onto Go
