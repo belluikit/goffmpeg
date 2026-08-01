@@ -123,6 +123,22 @@ void decoder_close(Decoder *d);
 #define GOFFMPEG_DEVICE_LIST_NO_FORMAT   (-2) // no such input format
 #define GOFFMPEG_DEVICE_LIST_UNSUPPORTED (-3) // format implements no enumeration
 #define GOFFMPEG_DEVICE_LIST_NO_AVDEVICE (-4) // built without libavdevice
+// GOFFMPEG_DEVICE_LIST_EMPTY means the host produced no device list at all.
+//
+// It exists to separate "this machine has nothing to enumerate" from "our
+// enumeration is broken", which the bare FAILED code cannot express. dshow is
+// the case that needs it: it reports AVERROR(EIO) for a cycle that finds
+// nothing, saying "Could not enumerate %s devices (or none found)" — the two
+// are one code upstream, and there is no way to tell them apart from here.
+//
+// Two details of dshow_get_device_list make this broader than "no camera":
+// the *video* cycle's EIO is deliberately tolerated and the function returns
+// the *audio* cycle's result, so a machine with cameras but no microphone
+// lands here too; and libavdevice frees the partially built list on any
+// negative return, so devices already collected are gone regardless.
+//
+// So this is a statement about the host, not about a particular device class.
+#define GOFFMPEG_DEVICE_LIST_EMPTY       (-5) // nothing enumerable on this host
 
 // device_list_open returns the device count (>= 0) and stores the list in
 // *list, or one of the GOFFMPEG_DEVICE_LIST_* codes with *list left NULL.

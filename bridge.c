@@ -414,9 +414,11 @@ int device_list_open(const char *format, void **list) {
         if (inner) avdevice_free_list_devices(&inner);
         // A format with no get_device_list callback (avfoundation) reports
         // ENOSYS; that is a capability answer, not an error, so it keeps its
-        // own code.
-        return rc == AVERROR(ENOSYS) ? GOFFMPEG_DEVICE_LIST_UNSUPPORTED
-                                     : GOFFMPEG_DEVICE_LIST_FAILED;
+        // own code. EIO is dshow's "or none found" — a fact about the host
+        // rather than a fault, and likewise distinguishable.
+        if (rc == AVERROR(ENOSYS)) return GOFFMPEG_DEVICE_LIST_UNSUPPORTED;
+        if (rc == AVERROR(EIO))    return GOFFMPEG_DEVICE_LIST_EMPTY;
+        return GOFFMPEG_DEVICE_LIST_FAILED;
     }
 
     DeviceList *dl = av_mallocz(sizeof(DeviceList));

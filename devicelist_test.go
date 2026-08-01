@@ -42,6 +42,22 @@ func reportDevices(t *testing.T, format string, devs []DeviceInfo) {
 	}
 }
 
+// dshowVerdict records, on stderr, whether the dshow listing was actually
+// asserted or merely skipped.
+//
+// Same reasoning as reopenVerdict, and the same reason it is needed: this test
+// used to fail on a host with no capture hardware, and now skips instead. That
+// is the right behaviour, but it makes green ambiguous — "enumerated a camera"
+// and "there was nothing to enumerate" are both green, and `go test` without
+// -v shows neither. Windows enumeration has no other coverage, so which one
+// happened needs to be visible in the log rather than inferred.
+func dshowVerdict(t *testing.T, format string, args ...any) {
+	t.Helper()
+	line := "[dshow] " + fmt.Sprintf(format, args...)
+	t.Log(line)
+	fmt.Fprintln(os.Stderr, line)
+}
+
 // openWithin opens a device on its own goroutine and gives up after d.
 //
 // Opening a capture device can block indefinitely rather than fail — a v4l2
@@ -213,12 +229,26 @@ func TestListInputSourcesDShow(t *testing.T) {
 	}
 	devs, err := ListInputSources("dshow")
 	skipIfNoEnumeration(t, err)
+	// A host with nothing to enumerate skips; anything else is still a
+	// failure. The distinction is worth having rather than skipping on any
+	// error: this test is the only coverage dshow enumeration has, so a blanket
+	// skip would turn a real regression into a green run.
+	//
+	// Note that dshow reports this whenever its *last* cycle finds nothing, so
+	// a machine with cameras but no microphone lands here as well — see
+	// ErrDeviceListNoDevices. Either way there is no device list to assert on.
+	if errors.Is(err, ErrDeviceListNoDevices) {
+		dshowVerdict(t, "SKIPPED — this host enumerated no capture devices; dshow listing not exercised")
+		t.Skip("no dshow capture devices on this host")
+	}
 	if err != nil {
 		t.Fatalf("ListInputSources(dshow): %v", err)
 	}
 	if len(devs) == 0 {
+		dshowVerdict(t, "SKIPPED — enumeration succeeded but returned nothing; dshow listing not exercised")
 		t.Skip("no dshow capture devices on this host")
 	}
+	dshowVerdict(t, "PASSED — enumerated %d dshow device(s); listing exercised for real", len(devs))
 	reportDevices(t, "dshow", devs)
 
 	// dshow lists audio sources alongside video ones, so filter before opening.
@@ -248,6 +278,48 @@ func TestListInputSourcesDShow(t *testing.T) {
 	// As with v4l2: enumeration is the contract, and it held. A camera that is
 	// switched off or already in use is machine state, not a broken build.
 	t.Skipf("enumerated %d dshow video device(s), none currently openable (see log)", len(video))
+}
+
+// TestDeviceListErrorCodes pins the bridge's GOFFMPEG_DEVICE_LIST_* codes to
+// the errors callers match on. It runs everywhere, which is the point: the code
+// that matters most here is -5, and the only platform that can produce it for
+// real is Windows with no capture hardware attached.
+//
+// The pairing that carries the weight is -1 against -5. Collapsing them was
+// what made TestListInputSourcesDShow fail on a host with no devices, and
+// separating them is only useful if a generic failure stays a failure — so
+// assert both directions rather than just the new code.
+func TestDeviceListErrorCodes(t *testing.T) {
+	cases := []struct {
+		rc   int
+		want error // sentinel to match, or nil when only a message is promised
+	}{
+		{-5, ErrDeviceListNoDevices},
+		{-3, ErrDeviceListUnsupported},
+		{-1, nil}, // generic failure: an error, but not any of the sentinels
+		{-2, nil}, // unknown format
+		{-4, nil}, // built without libavdevice
+	}
+
+	for _, tc := range cases {
+		err := deviceListError("dshow", tc.rc)
+		if err == nil {
+			t.Errorf("deviceListError(%d) = nil, want an error", tc.rc)
+			continue
+		}
+		if tc.want != nil {
+			if !errors.Is(err, tc.want) {
+				t.Errorf("deviceListError(%d) = %v, want errors.Is(..., %v)", tc.rc, err, tc.want)
+			}
+			continue
+		}
+		// A code with no sentinel must not accidentally match one, or the
+		// dshow test would skip on a genuine failure.
+		if errors.Is(err, ErrDeviceListNoDevices) {
+			t.Errorf("deviceListError(%d) = %v, must not match ErrDeviceListNoDevices — "+
+				"a real enumeration failure would then skip instead of failing", tc.rc, err)
+		}
+	}
 }
 
 // TestHasMediaUnknown guards the deliberate asymmetry in DeviceInfo.HasMedia,
