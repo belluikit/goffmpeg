@@ -196,6 +196,27 @@ var ErrDeviceListUnavailable = errors.New("goffmpeg: the loaded libgoffmpeg expo
 // OpenWithOptions falls back to the plain entry point and succeeds.
 var ErrOpenOptionsUnavailable = errors.New("goffmpeg: the loaded libgoffmpeg accepts no open options — rebuild the shared library, or build with cgo")
 
+// ErrDeviceListNoDevices is returned when the host produced no device list at
+// all, which in practice means it has no capture hardware attached.
+//
+// It is separate from a generic failure because the remedy is different and
+// because a caller usually wants to carry on: no camera on this machine is an
+// ordinary state, not a fault, and it should be as distinguishable as
+// avfoundation's "cannot enumerate" already is.
+//
+// Only dshow produces it. v4l2 walks /dev and reports an empty list with a nil
+// error when it finds nothing; avfoundation cannot enumerate at all and
+// reports ErrDeviceListUnsupported. dshow instead answers AVERROR(EIO) with
+// "Could not enumerate %s devices (or none found)", conflating an absent
+// device set with a broken enumerator — so this cannot promise the enumerator
+// was healthy, only that nothing came back.
+//
+// It is deliberately not "no camera". dshow_get_device_list tolerates the
+// video cycle's EIO and returns the audio cycle's result, so a machine with
+// working cameras but no microphone reports this too, and libavdevice discards
+// the devices it had already collected on the way out.
+var ErrDeviceListNoDevices = errors.New("goffmpeg: no capture devices could be enumerated on this host")
+
 // ErrAgain reports that no data was ready yet and Next should simply be called
 // again. It is neither a failure nor an end of stream.
 //
@@ -306,6 +327,8 @@ func deviceListError(format string, rc int) error {
 		return ErrDeviceListUnsupported
 	case -4:
 		return errors.New("goffmpeg: built without libavdevice")
+	case -5:
+		return ErrDeviceListNoDevices
 	default:
 		return fmt.Errorf("goffmpeg: listing %q devices failed: %d", format, rc)
 	}
