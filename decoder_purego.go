@@ -53,11 +53,14 @@ var (
 	decoder_open        func(d *cDecoder, url *byte) int32
 	decoder_open_opts   func(d *cDecoder, url *byte, options *byte) int32
 	decoder_open_device func(d *cDecoder, format *byte, url *byte, options *byte) int32
-	decoder_next        func(d *cDecoder) int32
-	decoder_get_rgba    func(d *cDecoder, buffer *byte) int32
-	decoder_get_audio   func(d *cDecoder, buffer **byte) int32
-	decoder_close       func(d *cDecoder)
-	decoder_seek        func(d *cDecoder, seconds float64) int32
+	// nil against a libgoffmpeg older than #5; openDeviceDecoder falls back to
+	// decoder_open_device and simply has no AVERROR to report.
+	decoder_open_device_err func(d *cDecoder, format *byte, url *byte, options *byte, averr *int32) int32
+	decoder_next            func(d *cDecoder) int32
+	decoder_get_rgba        func(d *cDecoder, buffer *byte) int32
+	decoder_get_audio       func(d *cDecoder, buffer **byte) int32
+	decoder_close           func(d *cDecoder)
+	decoder_seek            func(d *cDecoder, seconds float64) int32
 
 	decoder_set_audio_channels func(d *cDecoder, channels int32) int32
 
@@ -70,7 +73,19 @@ var (
 	device_list_description func(list uintptr, i int32) string
 	device_list_media_types func(list uintptr, i int32) int32
 	device_list_default     func(list uintptr) int32
-	device_list_free        func(list uintptr)
+
+	// Capture-mode enumeration. Probed as its own group: it arrived after
+	// device_list_*, so a library can export one and not the other.
+	device_modes_open         func(format *byte, url *byte, modes *uintptr) int32
+	device_modes_count        func(modes uintptr) int32
+	device_modes_width        func(modes uintptr, i int32) int32
+	device_modes_height       func(modes uintptr, i int32) int32
+	device_modes_min_fps      func(modes uintptr, i int32) float64
+	device_modes_max_fps      func(modes uintptr, i int32) float64
+	device_modes_pixel_format func(modes uintptr, i int32) string
+	device_modes_is_codec     func(modes uintptr, i int32) int32
+	device_modes_free         func(modes uintptr)
+	device_list_free          func(list uintptr)
 )
 
 func init() {
@@ -115,6 +130,14 @@ func init() {
 		purego.RegisterLibFunc(&decoder_open_opts, lib, "decoder_open_opts")
 	}
 
+	// Same probe for the device-open AVERROR out-param. Its absence is not
+	// worth reporting to the caller the way ErrOpenOptionsUnavailable is —
+	// nothing is lost but the detail in the error message, and the open itself
+	// behaves identically.
+	if hasSymbol(lib, "decoder_open_device_err") {
+		purego.RegisterLibFunc(&decoder_open_device_err, lib, "decoder_open_device_err")
+	}
+
 	// Device enumeration arrived after the shared bridge started shipping
 	// prebuilt in the goffmpeg-libs companion modules, so a library from an
 	// older release exports none of these symbols. RegisterLibFunc panics on a
@@ -130,6 +153,58 @@ func init() {
 	purego.RegisterLibFunc(&device_list_media_types, lib, "device_list_media_types")
 	purego.RegisterLibFunc(&device_list_default, lib, "device_list_default")
 	purego.RegisterLibFunc(&device_list_free, lib, "device_list_free")
+
+	// Its own probe, for the same reason the block above has one: mode
+	// enumeration is newer still, so a library can export device_list_* and
+	// none of these. listDeviceModes reports ErrDeviceModesUnavailable then.
+	if !hasSymbol(lib, "device_modes_open") {
+		return
+	}
+	purego.RegisterLibFunc(&device_modes_open, lib, "device_modes_open")
+	purego.RegisterLibFunc(&device_modes_count, lib, "device_modes_count")
+	purego.RegisterLibFunc(&device_modes_width, lib, "device_modes_width")
+	purego.RegisterLibFunc(&device_modes_height, lib, "device_modes_height")
+	purego.RegisterLibFunc(&device_modes_min_fps, lib, "device_modes_min_fps")
+	purego.RegisterLibFunc(&device_modes_max_fps, lib, "device_modes_max_fps")
+	purego.RegisterLibFunc(&device_modes_pixel_format, lib, "device_modes_pixel_format")
+	purego.RegisterLibFunc(&device_modes_is_codec, lib, "device_modes_is_codec")
+	purego.RegisterLibFunc(&device_modes_free, lib, "device_modes_free")
+}
+
+// listDeviceModes mirrors the cgo backend, reading the list through the
+// bridge's accessors.
+func listDeviceModes(format, url string) ([]DeviceMode, error) {
+	if device_modes_open == nil {
+		return nil, ErrDeviceModesUnavailable
+	}
+	cFormat := []byte(format + "\x00")
+	cURL := []byte(url + "\x00")
+
+	var modes uintptr
+	if rc := int(device_modes_open(&cFormat[0], &cURL[0], &modes)); rc < 0 {
+		return nil, deviceModesError(format, url, rc)
+	}
+	defer device_modes_free(modes)
+
+	n := int(device_modes_count(modes))
+	out := make([]DeviceMode, 0, n)
+	for i := 0; i < n; i++ {
+		m := DeviceMode{
+			Format: format,
+			Width:  int(device_modes_width(modes, int32(i))),
+			Height: int(device_modes_height(modes, int32(i))),
+			MinFPS: device_modes_min_fps(modes, int32(i)),
+			MaxFPS: device_modes_max_fps(modes, int32(i)),
+		}
+		name := device_modes_pixel_format(modes, int32(i))
+		if device_modes_is_codec(modes, int32(i)) != 0 {
+			m.Codec = name
+		} else {
+			m.PixelFormat = name
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 // listInputSources mirrors the cgo backend, reading the list through the
@@ -215,9 +290,15 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 	cFormat := []byte(format + "\x00")
 	cURL := []byte(url + "\x00")
 	cOpts := []byte(options + "\x00")
-	res := int(decoder_open_device(&d.d, &cFormat[0], &cURL[0], &cOpts[0]))
+	var averr int32
+	var res int
+	if decoder_open_device_err != nil {
+		res = int(decoder_open_device_err(&d.d, &cFormat[0], &cURL[0], &cOpts[0], &averr))
+	} else {
+		res = int(decoder_open_device(&d.d, &cFormat[0], &cURL[0], &cOpts[0]))
+	}
 	if res != 0 {
-		return nil, fmt.Errorf("open device %q %q failed: %d", format, url, res)
+		return nil, openDeviceError(format, url, res, int(averr))
 	}
 	return d, nil
 }

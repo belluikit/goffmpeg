@@ -72,6 +72,19 @@ int decoder_open(Decoder *d, const char *url);
 // url="0") via libavdevice. options is a comma-separated "key=value" list
 // passed to the input device (e.g. "framerate=30,pixel_format=nv12"), or "".
 int decoder_open_device(Decoder *d, const char *format, const char *url, const char *options);
+// decoder_open_device_err is decoder_open_device with the AVERROR reported.
+//
+// On a -1 return (avformat_open_input failed) *averr carries the code libav
+// actually gave, which is the difference between "no such device", "device
+// busy" and "the device refused this configuration" — the last being
+// AVERROR(EINVAL) on avfoundation, and the one a caller can act on by asking
+// device_modes_open what the device would accept instead.
+//
+// It is a separate out-param rather than the return value because the codes
+// above already occupy the small negatives that errno-derived AVERRORs use
+// (#5). *averr is set to 0 on success and on every non-open failure.
+int decoder_open_device_err(Decoder *d, const char *format, const char *url,
+                            const char *options, int *averr);
 // decoder_open_reader feeds libavformat from a Go io.Reader through a custom
 // AVIOContext. handle identifies the reader in the Go-side registry; pass
 // seekable=0 for a pure stream, which disables the seek callback and limits
@@ -162,5 +175,72 @@ const char *device_list_description(void *list, int i); // human-friendly name
 int device_list_media_types(void *list, int i);
 int device_list_default(void *list); // index of the default device, or -1
 void device_list_free(void *list);
+
+// Capture-mode enumeration.
+//
+// device_modes_open asks one device what configurations it will accept, so a
+// caller refused by OpenDevice can find out what to ask for instead. This is
+// the information libavdevice already has and only prints: avfoundation logs
+// "Supported modes:" and a list, then fails the open with nothing a program
+// can read (#5).
+//
+// It is separate from device_list_* because it is per device rather than per
+// format, and because libavdevice cannot supply it. None of avfoundation, v4l2
+// or dshow implements FFmpeg's create_device_capabilities, so each backend is
+// queried natively here: v4l2 by ioctl, avfoundation through AVCaptureDevice
+// (bridge_avf_darwin.m), dshow through IAMStreamConfig.
+//
+// url is the same selector decoder_open_device takes — "0" for avfoundation,
+// "/dev/video0" for v4l2, a dshow name with its "video=" prefix.
+//
+// A mode is a resolution, a framerate range and a pixel format. Ranges rather
+// than single rates because that is what the hardware reports: a camera
+// commonly offers 1920x1080 at anything from 1 to 60fps as one entry, and
+// flattening that would invent modes it never advertised.
+#define GOFFMPEG_DEVICE_MODES_FAILED      (-1) // query ran and failed
+#define GOFFMPEG_DEVICE_MODES_NO_FORMAT   (-2) // no such input format
+#define GOFFMPEG_DEVICE_MODES_UNSUPPORTED (-3) // no mode query for this format
+#define GOFFMPEG_DEVICE_MODES_NO_AVDEVICE (-4) // built without libavdevice
+#define GOFFMPEG_DEVICE_MODES_NO_DEVICE   (-5) // no such device, or not readable
+
+// device_modes_open returns the mode count (>= 0) and stores the list in
+// *modes, or one of the codes above with *modes left NULL. A device that opens
+// but advertises nothing is 0 with an empty list, not an error.
+int device_modes_open(const char *format, const char *url, void **modes);
+int device_modes_count(void *modes);
+int device_modes_width(void *modes, int i);
+int device_modes_height(void *modes, int i);
+// The framerate bounds are equal for a fixed-rate mode. 0 means the backend
+// reported no rate for this entry, which v4l2 does for a device whose driver
+// omits VIDIOC_ENUM_FRAMEINTERVALS.
+double device_modes_min_fps(void *modes, int i);
+double device_modes_max_fps(void *modes, int i);
+// The pixel format as libav names it ("nv12", "yuyv422"), or NULL if the
+// backend's format has no libav equivalent. The string belongs to the list and
+// dies with it.
+const char *device_modes_pixel_format(void *modes, int i);
+// device_modes_is_codec reports whether device_modes_pixel_format named a
+// decoder rather than a pixel layout — "mjpeg" and "h264" rather than "nv12".
+// A caller has to know, because the option that selects one is not the option
+// that selects the other on every backend.
+int device_modes_is_codec(void *modes, int i);
+void device_modes_free(void *modes);
+
+// Internal to the mode backends, not part of the Go-facing surface.
+//
+// device_modes_append adds one mode to a list device_modes_open is building,
+// ignoring an exact duplicate. It is declared here rather than kept static in
+// bridge.c because the AVFoundation query lives in its own translation unit
+// (bridge_avf_darwin.m) and has to reach it. Returns 0, or -1 if the list
+// could not grow.
+int device_modes_append(void *modes, int width, int height,
+                        double min_fps, double max_fps, const char *pixfmt,
+                        int is_codec);
+
+#if defined(__APPLE__) && !defined(GOFFMPEG_NO_AVDEVICE)
+// goffmpeg_avf_collect_modes fills modes from AVCaptureDevice. Implemented in
+// bridge_avf_darwin.m; returns 0, or a GOFFMPEG_DEVICE_MODES_* code.
+int goffmpeg_avf_collect_modes(const char *url, void *modes);
+#endif
 
 #endif
