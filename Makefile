@@ -244,6 +244,11 @@ ifneq ($(filter darwin_%,$(TARGET)),)
 	BRIDGE_SYSLIBS = -framework AVFoundation -framework CoreMedia -framework CoreVideo \
 		-framework CoreFoundation -framework Foundation -framework CoreGraphics \
 		-framework VideoToolbox -framework Security
+	# The AVFoundation capture-mode query is Objective-C and so cannot live in
+	# bridge.c. cgo picks it up from the package directory on its own; this
+	# shared-library link is the path that has to be told, and omitting it
+	# fails only at link time with an undefined goffmpeg_avf_collect_modes.
+	BRIDGE_EXTRA_SRC = bridge_avf_darwin.m
 endif
 ifneq ($(filter linux_%,$(TARGET)),)
 	# -Bsymbolic binds the FFmpeg symbols inside this object rather than
@@ -303,7 +308,7 @@ bridge-shared:
 		echo "no libraries for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	$(BRIDGE_CC) -shared -fPIC $(BRIDGE_LDFLAGS) \
 		-o "$(DIST_DIR)/lib/libgoffmpeg.$(LIB_EXT)" \
-		bridge.c \
+		bridge.c $(BRIDGE_EXTRA_SRC) \
 		-I"$(ROOT)/internal/libav/include" -L"$(DIST_DIR)/lib" \
 		-lavdevice -lavformat -lavcodec -lswscale -lswresample -lavutil -lm \
 		$(BRIDGE_SYSLIBS)
