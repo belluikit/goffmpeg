@@ -1,0 +1,30 @@
+goffmpeg
+========
+
+goffmpeg's own source code (the Go, C and Objective-C files in this
+repository, the Makefile and the build workflow) is licensed under the
+BSD-3-Clause license in LICENSE.
+
+FFmpeg headers
+--------------
+
+internal/libav/include/ holds the public headers of FFmpeg
+(https://ffmpeg.org), copied unmodified from an FFmpeg build at revision
+e2bc6d88cd68184288c16570e04881c3a426a05a (FFMPEG_VERSION
+"N-125841-ge2bc6d88cd" in libavutil/ffversion.h). They are part of FFmpeg
+and remain under the GNU Lesser General Public License, version 2.1 or (at
+your option) any later version. The license text is in
+COPYING.LGPLv2.1. The BSD-3-Clause license above does not apply to them.
+
+FFmpeg source for that revision:
+https://github.com/FFmpeg/FFmpeg/tree/e2bc6d88cd68184288c16570e04881c3a426a05a
+
+FFmpeg libraries
+----------------
+
+goffmpeg links prebuilt FFmpeg libraries published separately as
+github.com/belluikit/goffmpeg-libs. That build has no --enable-gpl and no
+--enable-nonfree, so those libraries are LGPL v2.1 or later; their exact
+version, configure line and source location are in goffmpeg-libs' NOTICE
+files. A program that links them is a "work that uses the Library" under
+the LGPL v2.1 and must meet its section 6 conditions when distributed.
