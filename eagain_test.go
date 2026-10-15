@@ -224,9 +224,9 @@ func captureTarget(t *testing.T) (format, url string) {
 			}
 		}
 		// Lowest node number first, as TestOpenDeviceV4L2Reopen already does.
-		// Enumeration order is not preference order, and on the CI runner the
-		// higher-numbered node is a camera passed through from the host that
-		// blocks on open — picking it wasted the whole test and then held the
+		// Enumeration order is not preference order, and on a former CI machine
+		// the higher-numbered node was a camera passed through from the host that
+		// blocked on open — picking it wasted the whole test and then held the
 		// device long enough to make the next attempts fail with EBUSY.
 		sort.SliceStable(video, func(i, j int) bool {
 			return v4l2NodeNumber(video[i].Name) < v4l2NodeNumber(video[j].Name)

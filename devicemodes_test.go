@@ -216,8 +216,8 @@ func TestListDeviceModesUnknownFormat(t *testing.T) {
 //
 // What it can assert is narrower than that, though, and the first version got
 // this wrong in both directions. Whether a camera opens *at all* is machine
-// state — the macOS CI runner is a LaunchAgent without camera access, and the
-// Linux runner has a passed-through camera that blocks on open — so a refused
+// state — a macOS LaunchAgent has no camera access, and a camera passed
+// through to a VM can block on open (both seen on former CI machines) — so a refused
 // open is not by itself evidence of anything. Worse, a blocked open cannot be
 // cancelled and keeps the device, so one such attempt turns every later mode
 // into EBUSY and manufactures a pile of failures from a single machine fact.

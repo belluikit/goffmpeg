@@ -31,7 +31,7 @@ const v4l2ReopenCycles = 3
 // lines are what that step prints.
 //
 // The distinction is the whole value of the test. A run went green while the
-// runner had no camera at all and the regression was never exercised.
+// machine had no camera at all and the regression was never exercised.
 func reopenVerdict(t *testing.T, format string, args ...any) {
 	t.Helper()
 	line := "[reopen] " + fmt.Sprintf(format, args...)
@@ -50,7 +50,7 @@ func reopenVerdict(t *testing.T, format string, args ...any) {
 // patches/0001 carries the one-line fix.
 //
 // The asymmetry between failing and skipping is deliberate. Whether *any*
-// camera opens is machine state — the runner's virtual camera needs OBS
+// camera opens is machine state — a virtual camera such as OBS's needs OBS
 // running — so no successful first open means skip. Once the first open works,
 // every later one on the same node must too, and a failure there is the bug
 // rather than the weather.
@@ -119,9 +119,9 @@ func TestOpenDeviceV4L2Reopen(t *testing.T) {
 //
 // A failed open skips rather than fails, which is the same bargain
 // TestListInputSourcesV4L2 and TestListInputSourcesDShow already strike.
-// Whether a camera opens is machine state — this runner's /dev/video0 is an
-// OBS Virtual Camera, which refuses unless OBS is running, and it has failed a
-// PR that could not reach any device code. Reporting a broken build for an idle
+// Whether a camera opens is machine state — a former CI machine's /dev/video0
+// was an OBS Virtual Camera, which refuses unless OBS is running, and it failed
+// a PR that could not reach any device code. Reporting a broken build for an idle
 // camera costs more than it catches.
 //
 // What is genuinely ours still fails: the geometry once the open succeeds. The
