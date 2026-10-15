@@ -240,6 +240,13 @@ func TestDeviceModesRoundTrip(t *testing.T) {
 		modesVerdict(t, "SKIPPED — %s has no mode query here: %v", format, err)
 		t.Skipf("no mode query for %s: %v", format, err)
 	}
+	// On macOS captureTarget names device "0" without enumerating, so a host
+	// with no camera at all (a hosted CI runner) lands here rather than in an
+	// enumeration skip. No device is a machine fact, not a defect.
+	if errors.Is(err, ErrDeviceNotFound) {
+		modesVerdict(t, "SKIPPED — %s %q names no capture device on this host; round trip not exercised", format, url)
+		t.Skipf("no capture device %q for %s on this host", url, format)
+	}
 	if err != nil {
 		t.Fatalf("ListDeviceModes(%s, %s): %v", format, url, err)
 	}
