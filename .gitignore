@@ -22,3 +22,8 @@ coverage.html
 .idea/
 .vscode/
 *.swp
+
+# OS and editor files, Go test and profiling output
+Thumbs.db
+*~
+coverage.out
