@@ -2,9 +2,11 @@ name: build
 
 # Builds the FFmpeg artifacts for every supported target.
 #
-# Runs on the self-hosted machines: they carry the toolchains (Xcode SDKs,
-# Android NDK, mingw-w64, llvm-mingw) and their own git credentials, so the
-# private companion modules resolve without a PAT.
+# Runs on GitHub-hosted runners with stock Go from actions/setup-go. The hosted
+# images carry Xcode (with the iOS SDKs) and the Android NDK; the jobs below
+# install what they do not carry — nasm, mingw-w64 and a pinned llvm-mingw.
+# Every belluikit module this needs is public, so nothing here holds or needs
+# a credential.
 #
 # The full matrix is expensive — eleven FFmpeg builds — and those artifacts only
 # change when the pinned revision or the configure line does. It therefore runs
@@ -19,25 +21,35 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # Fetch the private belluikit modules with the runner's own git credentials.
-  GOPRIVATE: github.com/belluikit/*
   # Pinned so every target is built from identical sources. Bump deliberately.
   FFMPEG_REPO: https://github.com/FFmpeg/FFmpeg.git
   FFMPEG_REF: e2bc6d88cd68184288c16570e04881c3a426a05a
+  # llvm-mingw, the toolchain for windows_arm64. Pinned with its digest from
+  # the release, so a replaced asset fails the download instead of the build.
+  LLVM_MINGW_TAG: "20261006"
+  LLVM_MINGW_LINUX_SHA256: 5f9c6ed95b2d4bdb2869a488c5fd5857fbdabcf288a0aa3eb1da43f6a08d8ab4
+  LLVM_MINGW_WINARM_SHA256: 9a835d5179c9f3a5a783c11a7f14062a249b4765dd11add64a66786864e82ab2
 
 jobs:
   # Cheap leg: the Go bindings against the published companion modules. This is
   # what guards day-to-day changes to the bridge and the Go API.
   bindings:
     name: bindings (macOS ARM64)
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
 
       - name: Verify formatting
         run: |
@@ -73,14 +85,15 @@ jobs:
       - name: Test (purego)
         run: CGO_ENABLED=0 go test -count=1 ./...
 
-  # Whether the expensive matrix should run at all.
+  # Whether the expensive matrix should run at all. Only git is needed, so it
+  # runs on Linux rather than spending macOS minutes on a diff.
   should-build:
     name: decide
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ubuntu-24.04
     outputs:
       run: ${{ steps.check.outputs.run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
       - id: check
@@ -98,13 +111,19 @@ jobs:
             echo "::notice::FFmpeg build inputs unchanged — skipping the matrix. Use workflow_dispatch to force it."
           fi
 
-  # Apple and Android build on the same machine: the NDK cross-compiles from
-  # macOS, and the Xcode SDKs are only here.
+  # Apple and Android build on the same image: the NDK cross-compiles from
+  # macOS, and the Xcode SDKs are only on macOS.
+  #
+  # The NDK is chosen once, explicitly, and handed to both the Makefile and the
+  # link check. The image carries several NDKs and also exports ANDROID_NDK
+  # (its default, not its newest), which the Makefile's `ANDROID_NDK ?=` would
+  # pick up — so without this the libraries and the link check could come from
+  # different NDKs.
   apple-android:
     name: ${{ matrix.target }}
     needs: should-build
     if: needs.should-build.outputs.run == 'true'
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -117,15 +136,35 @@ jobs:
           - android_arm
           - android_amd64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # FFmpeg's x86 assembly (darwin_amd64, android_amd64) needs nasm, which
+      # the image does not carry.
+      - name: Install build tools
+        run: brew install nasm
 
       - name: Fetch FFmpeg
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
 
+      # The NDK's prebuilt host directory is darwin-x86_64 even on arm64 hosts
+      # (the binaries are universal); fail here, by name, if that ever changes.
+      - name: Select the Android NDK
+        if: startsWith(matrix.target, 'android_')
+        run: |
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          test -d "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin" \
+            || { echo "::error::no darwin-x86_64 toolchain in NDK '$NDK'"; exit 1; }
+          echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
+          echo "::notice::using NDK $NDK"
+
       - name: Build ${{ matrix.target }}
-        run: make dist TARGET=${{ matrix.target }}
+        run: make dist TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
 
       # Desktop only: purego dlopens this, and the mobile targets configure
       # FFmpeg with --disable-avdevice and have no purego consumer.
@@ -156,21 +195,22 @@ jobs:
         run: |
           make sync-libs TARGET=${{ matrix.target }} LIBS_REPO="$RUNNER_TEMP/libs"
           go mod edit -replace \
-            github.com/belluikit/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
+            github.com/belluikit/goffmpeg-libs/${{ matrix.target }}="$RUNNER_TEMP/libs/${{ matrix.target }}"
           case "${{ matrix.target }}" in
             darwin_arm64) export GOOS=darwin GOARCH=arm64 ;;
             darwin_amd64) export GOOS=darwin GOARCH=amd64 ;;
             ios_arm64)
               export GOOS=ios GOARCH=arm64
               SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-              export CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -mios-version-min=13.0" ;;
+              CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -mios-version-min=13.0"
+              export CC ;;
             iossimulator_arm64)
               export GOOS=ios GOARCH=arm64 TAGS=iossimulator
               SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-              export CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -mios-simulator-version-min=13.0" ;;
+              CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -mios-simulator-version-min=13.0"
+              export CC ;;
             android_*)
-              NDK=$(ls -d "$HOME"/Library/Android/sdk/ndk/* | tail -1)
-              BIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+              BIN="$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
               export GOOS=android
               case "${{ matrix.target }}" in
                 android_arm64) export GOARCH=arm64 CC="$BIN/aarch64-linux-android21-clang" ;;
@@ -184,7 +224,7 @@ jobs:
           CGO_ENABLED=1 go test -c -o /dev/null ${TAGS:+-tags $TAGS} .
           git checkout go.mod
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libav-${{ matrix.target }}
           path: internal/libav/dist/${{ matrix.target }}
@@ -196,13 +236,38 @@ jobs:
     name: ${{ matrix.target }}
     needs: should-build
     if: needs.should-build.outputs.run == 'true'
-    runs-on: [self-hosted, trader]
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         target: [linux_amd64, windows_amd64, windows_arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # nasm for FFmpeg's x86 assembly, libssl-dev and pkg-config for
+      # --enable-openssl on Linux, patch for patches/, mingw-w64 for
+      # windows_amd64.
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            nasm pkg-config libssl-dev patch mingw-w64
+
+      # Windows on ARM needs llvm-mingw; the distro's mingw-w64 only targets x86.
+      - name: Install llvm-mingw
+        if: matrix.target == 'windows_arm64'
+        run: |
+          ASSET="llvm-mingw-$LLVM_MINGW_TAG-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$ASSET" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_TAG/$ASSET"
+          echo "$LLVM_MINGW_LINUX_SHA256  $RUNNER_TEMP/$ASSET" | sha256sum -c -
+          sudo mkdir -p /opt/llvm-mingw
+          sudo tar -xJf "$RUNNER_TEMP/$ASSET" -C /opt/llvm-mingw --strip-components=1
+          /opt/llvm-mingw/bin/aarch64-w64-mingw32-gcc --version
 
       - name: Fetch FFmpeg
         run: |
@@ -210,7 +275,7 @@ jobs:
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
 
       - name: Build ${{ matrix.target }}
-        run: make dist TARGET=${{ matrix.target }} NPROC=$(nproc) LLVM_MINGW=/opt/llvm-mingw
+        run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
 
       # Every target on this runner is a desktop one, so all three get a shared
       # bridge: the Windows legs test against it on a real Windows runner, and
@@ -232,7 +297,7 @@ jobs:
         run: |
           make sync-libs TARGET=${{ matrix.target }} LIBS_REPO="$RUNNER_TEMP/libs"
           go mod edit -replace \
-            github.com/belluikit/goffmpeg-libs/${{ matrix.target }}=$RUNNER_TEMP/libs/${{ matrix.target }}
+            github.com/belluikit/goffmpeg-libs/${{ matrix.target }}="$RUNNER_TEMP/libs/${{ matrix.target }}"
           case "${{ matrix.target }}" in
             linux_amd64)   export GOOS=linux GOARCH=amd64 ;;
             windows_amd64) export GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc ;;
@@ -260,7 +325,7 @@ jobs:
         if: matrix.target == 'linux_amd64'
         run: |
           go mod edit -replace \
-            github.com/belluikit/goffmpeg-libs/linux_amd64=$RUNNER_TEMP/libs/linux_amd64
+            github.com/belluikit/goffmpeg-libs/linux_amd64="$RUNNER_TEMP/libs/linux_amd64"
           # Prove it: the replace must resolve to the clone, not the cache.
           go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
             github.com/belluikit/goffmpeg-libs/linux_amd64
@@ -270,125 +335,117 @@ jobs:
         if: always() && matrix.target == 'linux_amd64'
         run: git checkout go.mod
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libav-${{ matrix.target }}
           path: internal/libav/dist/${{ matrix.target }}
           retention-days: 14
 
-      # The Windows runners have no credentials for the private companion
-      # repository, so hand them the assembled module — go.mod and the cgo
-      # directives from the clone, lib/ from this build — as an artifact.
-      - uses: actions/upload-artifact@v4
+      # The Windows legs test the libraries this job just built, on another
+      # machine. Hand them the assembled module — go.mod and the cgo directives
+      # from the clone, lib/ from this build — so their replace has a real
+      # module to point at.
+      - uses: actions/upload-artifact@v7
         if: startsWith(matrix.target, 'windows_')
         with:
           name: libsmod-${{ matrix.target }}
           path: ${{ runner.temp }}/libs/${{ matrix.target }}
           retention-days: 14
 
-  # The published companion module, staged by a machine that has credentials for
-  # the private repository so the Windows runners never need any.
-  #
-  # This is what lets the Windows legs run on an ordinary push instead of only
-  # when the FFmpeg matrix does. That distinction matters: the last two Windows
-  # bugs (#6's int return width, and the symbol lookup that would not compile)
-  # were both in Go code, and a Go-only change does not trigger the matrix — so
-  # the legs that would have caught them would not have run.
-  #
-  # Unconditional, though it is only consumed when the matrix is skipped. Gating
-  # it on that would mean this path never runs on any change to this file —
-  # build.yml is itself one of the triggers, so a workflow edit always forces
-  # the matrix — and a fallback that is only exercised by other people's commits
-  # is one that breaks silently. The cost is one file copy and one upload.
-  windows-libs:
-    name: stage published libs ${{ matrix.target }}
-    runs-on: [self-hosted, trader]
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [windows_amd64, windows_arm64]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch the published module
-        run: |
-          MOD=github.com/belluikit/goffmpeg-libs/${{ matrix.target }}
-          go mod download "$MOD"
-          V=$(go list -m -f '{{.Version}}' "$MOD")
-          SRC="$(go env GOMODCACHE)/$MOD@$V"
-          test -d "$SRC" || { echo "::error::no module at $SRC"; exit 1; }
-          rm -rf "$RUNNER_TEMP/libs"
-          mkdir -p "$RUNNER_TEMP/libs"
-          # The module cache is read-only; the copy has to be writable because
-          # the consuming job replaces into it.
-          cp -R "$SRC" "$RUNNER_TEMP/libs/${{ matrix.target }}"
-          chmod -R u+w "$RUNNER_TEMP/libs/${{ matrix.target }}"
-          echo "::notice::staged $MOD@$V"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libsmod-published-${{ matrix.target }}
-          path: ${{ runner.temp }}/libs/${{ matrix.target }}
-          retention-days: 14
-
   # The Windows artifacts are cross-built on Linux, so nothing above ever
   # executes Windows code — a link check proves the symbols resolve, not that a
-  # call works. These legs run the suite on real Windows. Both machines have a
-  # camera attached, so the dshow capture test exercises hardware rather than
-  # skipping.
+  # call works. These legs run the suite on real Windows. The hosted runners
+  # have no camera, so the dshow capture tests skip here (loudly, with -v).
   #
   # Runs on every push. When the matrix ran, it tests the libraries just built,
   # so a bridge regression is caught before it is tagged; otherwise it tests the
   # published ones, which is what a Go-only change should be measured against
-  # anyway. always() is needed because linux-windows is skipped on the fallback
-  # path, and a skipped dependency would otherwise skip this too — but a matrix
-  # that ran and *failed* must still stop this, or a broken build would be
-  # reported green by testing the published libraries instead.
+  # anyway. That distinction matters: the last two Windows bugs (#6's int return
+  # width, and the symbol lookup that would not compile) were both in Go code,
+  # and a Go-only change does not trigger the matrix — so a Windows leg gated on
+  # the matrix would not have caught them.
+  #
+  # always() is needed because linux-windows is skipped on the fallback path,
+  # and a skipped dependency would otherwise skip this too — but a matrix that
+  # ran and *failed* must still stop this, or a broken build would be reported
+  # green by testing the published libraries instead.
   windows-test:
     name: test ${{ matrix.target }}
-    needs: [linux-windows, windows-libs]
+    needs: linux-windows
     if: >-
       always()
       && needs.linux-windows.result != 'failure'
       && needs.linux-windows.result != 'cancelled'
-    runs-on: [self-hosted, "${{ matrix.runner }}"]
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: windows_amd64
-            runner: windows_omen
+            runner: windows-2025
+            # mingw-w64 from the image (runner-images Install-Mingw64.ps1).
             cc: C:\mingw64\bin\gcc.exe
           - target: windows_arm64
-            runner: windows_parallels
+            runner: windows-11-arm
+            # Installed by the llvm-mingw step below.
             cc: C:\llvm-mingw\bin\clang.exe
+    env:
+      LIBS_MOD: github.com/belluikit/goffmpeg-libs/${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # The arm64 image has no mingw toolchain; llvm-mingw's native aarch64
+      # build is what cgo compiles with there.
+      - name: Install llvm-mingw
+        if: matrix.target == 'windows_arm64'
+        shell: pwsh
+        run: |
+          $asset = "llvm-mingw-$env:LLVM_MINGW_TAG-ucrt-aarch64"
+          $zip = Join-Path $env:RUNNER_TEMP "$asset.zip"
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$asset.zip" -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne $env:LLVM_MINGW_WINARM_SHA256) { throw "llvm-mingw digest mismatch: $hash" }
+          Expand-Archive -Path $zip -DestinationPath C:\
+          Move-Item "C:\$asset" C:\llvm-mingw
+          & C:\llvm-mingw\bin\clang.exe --version
 
       - name: Download the freshly built libraries
         if: needs.linux-windows.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: libsmod-${{ matrix.target }}
           path: ${{ runner.temp }}\libs\${{ matrix.target }}
 
-      - name: Download the published libraries
+      - name: Point at the freshly built libraries
+        if: needs.linux-windows.result == 'success'
+        shell: cmd
+        run: go mod edit -replace %LIBS_MOD%=${{ runner.temp }}\libs\${{ matrix.target }}
+
+      # Without the replace, the module resolves to the published release.
+      - name: Fetch the published libraries
         if: needs.linux-windows.result != 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: libsmod-published-${{ matrix.target }}
-          path: ${{ runner.temp }}\libs\${{ matrix.target }}
+        shell: cmd
+        run: go mod download %LIBS_MOD%
 
-      # purego resolves the shared library relative to the working directory.
+      # Prove it: say which libraries the suite is about to link — the replace
+      # directory when the matrix ran, the module cache otherwise. purego
+      # resolves the shared library relative to the working directory, so stage
+      # it from that same place.
       - name: Stage the shared library for purego
-        shell: cmd
+        shell: pwsh
         run: |
-          mkdir internal\libav\dist\${{ matrix.target }}\lib
-          copy /Y "${{ runner.temp }}\libs\${{ matrix.target }}\lib\libgoffmpeg.dll" internal\libav\dist\${{ matrix.target }}\lib\
-
-      - name: Point at the staged libraries
-        shell: cmd
-        run: go mod edit -replace github.com/belluikit/goffmpeg-libs/${{ matrix.target }}=${{ runner.temp }}\libs\${{ matrix.target }}
+          $dir = go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' $env:LIBS_MOD
+          go list -m -f '{{.Path}} {{.Version}} => {{with .Replace}}{{.Dir}}{{end}}' $env:LIBS_MOD
+          Write-Output "::notice::testing against $dir"
+          $dll = Join-Path $dir "lib\libgoffmpeg.dll"
+          if (-not (Test-Path $dll)) { throw "no shared library at $dll" }
+          $dst = "internal\libav\dist\${{ matrix.target }}\lib"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item $dll $dst
 
       - name: Test (cgo)
         shell: cmd
@@ -409,9 +466,19 @@ jobs:
     name: linux_arm64
     needs: should-build
     if: needs.should-build.outputs.run == 'true'
-    runs-on: [self-hosted, linux_parallels]
+    runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config libssl-dev patch
 
       - name: Fetch FFmpeg
         run: |
@@ -419,10 +486,11 @@ jobs:
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
 
       - name: Build linux_arm64
-        run: make dist TARGET=linux_arm64 NPROC=$(nproc)
+        run: make dist TARGET=linux_arm64 NPROC="$(nproc)"
 
       # Native platform: build the shared bridge and exercise both backends.
-      # This machine has a v4l2 device, so the capture test runs for real here.
+      # The hosted runner has no v4l2 device, so the capture tests skip here;
+      # the reopen test below says so in the log rather than passing silently.
       - name: Shared bridge
         run: make bridge-shared TARGET=linux_arm64
 
@@ -443,7 +511,7 @@ jobs:
           git clone --depth 1 https://github.com/belluikit/goffmpeg-libs.git "$RUNNER_TEMP/libs"
           make sync-libs TARGET=linux_arm64 LIBS_REPO="$RUNNER_TEMP/libs"
           go mod edit -replace \
-            github.com/belluikit/goffmpeg-libs/linux_arm64=$RUNNER_TEMP/libs/linux_arm64
+            github.com/belluikit/goffmpeg-libs/linux_arm64="$RUNNER_TEMP/libs/linux_arm64"
           # Prove it: the replace must resolve to the clone, not the cache.
           go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
             github.com/belluikit/goffmpeg-libs/linux_arm64
@@ -456,9 +524,11 @@ jobs:
       #
       # Verbose because `go test` buffers a package's output and discards it
       # when the package passes, so a skip and a pass look identical from the
-      # outside. This test skipping when no camera is attached is expected; it
-      # skipping silently while everyone reads the green tick as proof of the
-      # fix is how #14 nearly got closed on a run that never touched a device.
+      # outside. This test skipping when no camera is attached is expected — and
+      # on a hosted runner it always skips, so a green tick here is not evidence
+      # about #14. It skipping silently while everyone reads the green tick as
+      # proof of the fix is how #14 nearly got closed on a run that never
+      # touched a device.
       - name: Test v4l2 reopen (#14)
         run: go test -count=1 -v -run TestOpenDeviceV4L2Reopen .
 
@@ -473,7 +543,7 @@ jobs:
         if: always()
         run: git checkout go.mod
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libav-linux_arm64
           path: internal/libav/dist/linux_arm64
