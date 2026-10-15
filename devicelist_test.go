@@ -210,8 +210,8 @@ func TestListInputSourcesV4L2(t *testing.T) {
 
 	// Enumeration is this test's contract and it held — the listing above is
 	// the evidence. Whether any of those cameras will *open* is machine state:
-	// the runner has an OBS virtual camera that fails unless OBS is running,
-	// and a passed-through FaceTime camera that blocks. Failing on that would
+	// former CI machines had an OBS virtual camera that fails unless OBS is
+	// running, and a passed-through FaceTime camera that blocks. Failing on that would
 	// report a broken build for an idle camera, so it skips, loudly.
 	t.Skipf("enumerated %d video-capture node(s), none currently openable (see log)", len(video))
 }
