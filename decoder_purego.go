@@ -242,6 +242,9 @@ func listInputSources(format string) ([]DeviceInfo, error) {
 
 type puregoDecoder struct {
 	d cDecoder
+	// audio holds the caller's channel and rate requests, so rebuilding the
+	// resampler for one keeps the other.
+	audio audioRequest
 }
 
 func openDecoder(url, options string) (IDecoder, error) {
@@ -356,7 +359,17 @@ func (d *puregoDecoder) SetAudioChannels(n int) error {
 	if res := int(decoder_set_audio_channels(&d.d, int32(n))); res < 0 {
 		return fmt.Errorf("set audio channels to %d failed: %d", n, res)
 	}
+	d.audio.channels = n
 	return nil
+}
+
+func (d *puregoDecoder) SetAudioSampleRate(rate int) error {
+	if decoder_set_audio_channels == nil {
+		return errors.New("library not loaded")
+	}
+	return d.audio.setRate(rate, &d.d.sample_rate, func(channels int) int {
+		return int(decoder_set_audio_channels(&d.d, int32(channels)))
+	})
 }
 
 func (d *puregoDecoder) Seek(seconds float64) error {
