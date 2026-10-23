@@ -41,6 +41,13 @@ type IDecoder interface {
 	// decoding starts — rebuilding discards buffered resampler state.
 	// AudioInfo reports the resulting count, which may differ from n.
 	SetAudioChannels(n int) error
+	// SetAudioSampleRate rebuilds the resampler to emit audio at rate Hz;
+	// rate <= 0 restores the stream's own rate. swresample does the
+	// conversion, along with the channel and sample-format conversion it
+	// already performs. Call before decoding starts — rebuilding discards
+	// buffered resampler state. AudioInfo reports the resulting rate. The
+	// channel count set by SetAudioChannels is kept, and the reverse.
+	SetAudioSampleRate(rate int) error
 	// Next advances to the next decoded frame and reports which stream it
 	// came from. There are four outcomes, and a live source produces all
 	// four:

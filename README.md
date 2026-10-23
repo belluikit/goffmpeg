@@ -92,7 +92,7 @@ briefly before calling again.
 ## API overview
 
 All openers return an `IDecoder` (`VideoInfo`, `AudioInfo`, `Position`,
-`Duration`, `Seek`, `SetAudioChannels`, `Next`, `GetRGBA`, `GetAudio`, `Close`).
+`Duration`, `Seek`, `SetAudioChannels`, `SetAudioSampleRate`, `Next`, `GetRGBA`, `GetAudio`, `Close`).
 
 | Function | Opens |
 |---|---|

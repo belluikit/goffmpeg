@@ -22,6 +22,9 @@ type cgoDecoder struct {
 	// handle is non-zero only for reader-backed decoders; it keys the Go-side
 	// reader registry that the AVIO callbacks look up (see reader_cgo.go).
 	handle int64
+	// audio holds the caller's channel and rate requests, so rebuilding the
+	// resampler for one keeps the other.
+	audio audioRequest
 }
 
 func openDecoder(url, options string) (IDecoder, error) {
@@ -191,7 +194,14 @@ func (d *cgoDecoder) SetAudioChannels(n int) error {
 	if res := C.decoder_set_audio_channels(&d.d, C.int(n)); res < 0 {
 		return fmt.Errorf("set audio channels to %d failed: %d", n, int(res))
 	}
+	d.audio.channels = n
 	return nil
+}
+
+func (d *cgoDecoder) SetAudioSampleRate(rate int) error {
+	return d.audio.setRate(rate, (*int32)(unsafe.Pointer(&d.d.sample_rate)), func(channels int) int {
+		return int(C.decoder_set_audio_channels(&d.d, C.int(channels)))
+	})
 }
 
 func (d *cgoDecoder) Seek(seconds float64) error {
