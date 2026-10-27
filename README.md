@@ -125,6 +125,12 @@ Capture devices per platform:
 metadata node blocks indefinitely when opened. The iOS and Android builds have
 no libavdevice, so there is no device capture there.
 
+FFmpeg's own log goes to stderr, and the package sets it to errors only, so
+its warnings (a missing SIMD conversion path, the AAC decoder's discarded
+priming samples after a seek) stay out of your application's output.
+`SetLogLevel(goffmpeg.LogWarning)` or `LogInfo` brings them back while
+debugging; the level is process-wide.
+
 Decoder failures carry the FFmpeg error code as `AVError`, reachable with
 `errors.As`. [BUILDING.md](BUILDING.md) has the full detail on network options,
 capture and per-format behaviour.
