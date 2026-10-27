@@ -203,16 +203,34 @@ int decoder_seek(Decoder *d, double seconds) {
     return 0;
 }
 
+// frame_position sets d->position from a decoded frame of stream idx.
+static void frame_position(Decoder *d, AVFrame *f, int idx) {
+    int64_t pts = f->best_effort_timestamp;
+    if (pts == AV_NOPTS_VALUE) pts = f->pts;
+    if (pts == AV_NOPTS_VALUE) pts = 0;
+    d->position = (double)pts * av_q2d(d->fmt_ctx->streams[idx]->time_base);
+}
+
+// receive takes a frame the decoder already holds: 1 if one is ready, 0 if it
+// needs more input, AVERROR_EOF once it is drained, another negative on error.
+static int receive(AVCodecContext *ctx, AVFrame *f) {
+    int ret = avcodec_receive_frame(ctx, f);
+    if (ret == AVERROR(EAGAIN)) return 0;
+    return ret == 0 ? 1 : ret;
+}
+
+// decoder_next takes frames the decoders already hold before reading another
+// packet, so a packet that decodes to several frames loses none. At the end of
+// the input it drains them: frame threading holds back about a frame per
+// thread, and without the drain those were dropped, every video losing its
+// last frames and a clip shorter than the thread count losing all of them
+// (#22). v_frame and a_frame mark a decoder that opened.
 int decoder_next(Decoder *d) {
-    int ret;
-    while ((ret = av_read_frame(d->fmt_ctx, d->pkt)) >= 0) {
-        if (d->pkt->stream_index == d->v_stream_idx) {
-            ret = avcodec_send_packet(d->v_ctx, d->pkt);
-            av_packet_unref(d->pkt);
-            if (ret < 0) return ret;
-            ret = avcodec_receive_frame(d->v_ctx, d->v_frame);
-            if (ret == AVERROR(EAGAIN)) continue;
-            if (ret == 0) {
+    for (;;) {
+        int v_done = 1, a_done = 1;
+        if (d->v_frame) {
+            int ret = receive(d->v_ctx, d->v_frame);
+            if (ret == 1) {
                 // Adopt the real geometry once a frame arrives; probing may
                 // not have resolved it, and callers size their buffers from
                 // the values reported here.
@@ -220,37 +238,43 @@ int decoder_next(Decoder *d) {
                     d->width = d->v_frame->width;
                     d->height = d->v_frame->height;
                 }
-                AVStream *st = d->fmt_ctx->streams[d->v_stream_idx];
-                int64_t pts = d->v_frame->best_effort_timestamp;
-                if (pts == AV_NOPTS_VALUE) pts = d->v_frame->pts;
-                if (pts == AV_NOPTS_VALUE) pts = 0;
-                d->position = (double)pts * av_q2d(st->time_base);
+                frame_position(d, d->v_frame, d->v_stream_idx);
                 return 1;
             }
-        } else if (d->pkt->stream_index == d->a_stream_idx) {
-            ret = avcodec_send_packet(d->a_ctx, d->pkt);
-            av_packet_unref(d->pkt);
-            if (ret < 0) return ret;
-            ret = avcodec_receive_frame(d->a_ctx, d->a_frame);
-            if (ret == AVERROR(EAGAIN)) continue;
-            if (ret == 0) {
-                AVStream *st = d->fmt_ctx->streams[d->a_stream_idx];
-                int64_t pts = d->a_frame->best_effort_timestamp;
-                if (pts == AV_NOPTS_VALUE) pts = d->a_frame->pts;
-                if (pts == AV_NOPTS_VALUE) pts = 0;
-                d->position = (double)pts * av_q2d(st->time_base);
+            if (ret < 0 && ret != AVERROR_EOF) return ret;
+            v_done = ret == AVERROR_EOF;
+        }
+        if (d->a_frame) {
+            int ret = receive(d->a_ctx, d->a_frame);
+            if (ret == 1) {
+                frame_position(d, d->a_frame, d->a_stream_idx);
                 return 2;
             }
-        } else {
-            av_packet_unref(d->pkt);
+            if (ret < 0 && ret != AVERROR_EOF) return ret;
+            a_done = ret == AVERROR_EOF;
         }
+        if (v_done && a_done) return 0;
+
+        int ret = av_read_frame(d->fmt_ctx, d->pkt);
+        // EAGAIN is a non-blocking device saying "not yet" and must not be
+        // confused with either an end or a failure (#4).
+        if (ret == AVERROR(EAGAIN)) return GOFFMPEG_AGAIN;
+        if (ret == AVERROR_EOF) {
+            // A NULL packet starts the drain. Sending it again once draining
+            // returns AVERROR_EOF, which is harmless, so no state is kept.
+            if (d->v_frame) avcodec_send_packet(d->v_ctx, NULL);
+            if (d->a_frame) avcodec_send_packet(d->a_ctx, NULL);
+            continue;
+        }
+        if (ret < 0) return ret;
+
+        AVCodecContext *ctx = NULL;
+        if (d->v_frame && d->pkt->stream_index == d->v_stream_idx) ctx = d->v_ctx;
+        if (d->a_frame && d->pkt->stream_index == d->a_stream_idx) ctx = d->a_ctx;
+        ret = ctx ? avcodec_send_packet(ctx, d->pkt) : 0;
+        av_packet_unref(d->pkt);
+        if (ret < 0) return ret;
     }
-    // The loop above exits only on a negative av_read_frame. EOF is the clean
-    // end of a file; EAGAIN is a non-blocking device saying "not yet" and must
-    // not be confused with either an end or a failure (#4).
-    if (ret == AVERROR_EOF) return 0;
-    if (ret == AVERROR(EAGAIN)) return GOFFMPEG_AGAIN;
-    return ret;
 }
 
 int decoder_get_rgba(Decoder *d, uint8_t *buffer) {
