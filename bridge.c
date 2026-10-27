@@ -2,6 +2,29 @@
 #include <libavutil/mem.h>
 #include <libavutil/channel_layout.h>
 
+// find_video_stream is av_find_best_stream for video, minus attached pictures.
+// The cover art an MP3, M4A or FLAC embeds is a one-packet video stream, and
+// av_find_best_stream ranks it like any other: picked, it reports the cover's
+// size and yields one frame, so a player waits for video that never comes.
+// Those streams are hidden for the call rather than ranked by hand, so a file
+// with real video still gets FFmpeg's own choice among the rest. They are
+// marked AVMEDIA_TYPE_NB, a type no real stream has, so the restore finds
+// exactly these.
+static int find_video_stream(AVFormatContext *fmt) {
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        AVStream *st = fmt->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+            (st->disposition & AV_DISPOSITION_ATTACHED_PIC))
+            st->codecpar->codec_type = AVMEDIA_TYPE_NB;
+    }
+    int idx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_NB)
+            fmt->streams[i]->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    }
+    return idx;
+}
+
 // decoder_setup_streams finds the best video/audio streams, opens their
 // decoders, and prepares the swscale/swresample converters. Shared by
 // decoder_open (files/URLs), decoder_open_device (capture devices) and
@@ -11,7 +34,7 @@ int decoder_setup_streams(Decoder *d) {
     if (avformat_find_stream_info(d->fmt_ctx, NULL) < 0) return -2;
 
     // Video stream
-    d->v_stream_idx = av_find_best_stream(d->fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    d->v_stream_idx = find_video_stream(d->fmt_ctx);
     if (d->v_stream_idx >= 0) {
         AVStream *st = d->fmt_ctx->streams[d->v_stream_idx];
         const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
