@@ -203,6 +203,10 @@ int decoder_seek(Decoder *d, double seconds) {
     return 0;
 }
 
+int decoder_struct_size(void) {
+    return (int)sizeof(Decoder);
+}
+
 // frame_position sets d->position from a decoded frame of stream idx.
 static void frame_position(Decoder *d, AVFrame *f, int idx) {
     int64_t pts = f->best_effort_timestamp;
