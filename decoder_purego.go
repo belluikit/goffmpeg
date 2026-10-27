@@ -124,8 +124,9 @@ func init() {
 	// FFmpeg's own symbol, exported because libgoffmpeg links libavutil in.
 	// Probed like the bridge's later additions, then applied at once: the
 	// package's default level is LogError (see SetLogLevel, #19).
-	if hasSymbol(lib, "av_log_set_level") {
+	if hasSymbol(lib, "av_log_set_level") && hasSymbol(lib, "av_log_get_level") {
 		purego.RegisterLibFunc(&av_log_set_level, lib, "av_log_set_level")
+		purego.RegisterLibFunc(&av_log_get_level, lib, "av_log_get_level")
 		_ = setLogLevel(LogError)
 	}
 
@@ -179,8 +180,21 @@ func init() {
 	purego.RegisterLibFunc(&device_modes_free, lib, "device_modes_free")
 }
 
-// av_log_set_level is nil against a library that does not export it.
-var av_log_set_level func(level int32)
+// av_log_set_level and av_log_get_level are nil against a library that does
+// not export them.
+var (
+	av_log_set_level func(level int32)
+	av_log_get_level func() int32
+)
+
+// logLevel is FFmpeg's current level, or LogInfo, its default, when the
+// library cannot report it.
+func logLevel() LogLevel {
+	if av_log_get_level == nil {
+		return LogInfo
+	}
+	return LogLevel(av_log_get_level())
+}
 
 func setLogLevel(level LogLevel) error {
 	if av_log_set_level == nil {

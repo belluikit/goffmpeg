@@ -56,10 +56,29 @@ func TestLogHelper(t *testing.T) {
 	decode()
 }
 
-// By default FFmpeg's warnings stay off the application's stderr, and raising
-// the level brings them back (#19). The LogInfo run is what shows the default
-// run measures anything: at FFmpeg's own default the same decode warns ("Could
-// not update timestamps for discarded samples", from the AAC decoder).
+// The package starts FFmpeg at LogError, and SetLogLevel moves it (#19). Read
+// back from FFmpeg itself, so it holds on every runner whatever the decode
+// below happens to log there.
+func TestDefaultLogLevel(t *testing.T) {
+	if got := logLevel(); got != LogError {
+		t.Fatalf("FFmpeg's level when the package loads: %d, want LogError (%d)", got, LogError)
+	}
+	if err := SetLogLevel(LogWarning); err != nil {
+		t.Fatal(err)
+	}
+	defer SetLogLevel(LogError)
+	if got := logLevel(); got != LogWarning {
+		t.Errorf("after SetLogLevel(LogWarning): %d", got)
+	}
+}
+
+// What reaches stderr. The LogDebug run is the control: FFmpeg logs while
+// probing any file there, so an empty capture would mean the capture misses
+// FFmpeg's log. The decode's own warning is machine-dependent: on a developer
+// Mac it prints the AAC decoder's "Could not update timestamps for discarded
+// samples" at LogInfo, while GitHub's macOS and Windows runners print nothing
+// at LogInfo for it, so the default run is a full check only where it warns,
+// and TestDefaultLogLevel covers the rest.
 func TestLogLevel(t *testing.T) {
 	if _, err := os.Stat("testdata/sample.mp4"); err != nil {
 		t.Skipf("sample media unavailable: %v", err)
@@ -76,8 +95,8 @@ func TestLogLevel(t *testing.T) {
 		return stderr.String()
 	}
 
-	if got := run(strconv.Itoa(int(LogInfo))); got == "" {
-		t.Error("nothing printed at LogInfo: this decode no longer warns, or the capture misses FFmpeg's log")
+	if got := run(strconv.Itoa(int(LogDebug))); got == "" {
+		t.Error("nothing printed at LogDebug: the capture is not seeing FFmpeg's log")
 	}
 	if got := run(""); got != "" {
 		t.Errorf("FFmpeg printed at the default level:\n%s", got)
