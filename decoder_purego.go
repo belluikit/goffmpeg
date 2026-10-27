@@ -121,6 +121,14 @@ func init() {
 	purego.RegisterLibFunc(&decoder_seek, lib, "decoder_seek")
 	purego.RegisterLibFunc(&decoder_set_audio_channels, lib, "decoder_set_audio_channels")
 
+	// FFmpeg's own symbol, exported because libgoffmpeg links libavutil in.
+	// Probed like the bridge's later additions, then applied at once: the
+	// package's default level is LogError (see SetLogLevel, #19).
+	if hasSymbol(lib, "av_log_set_level") {
+		purego.RegisterLibFunc(&av_log_set_level, lib, "av_log_set_level")
+		_ = setLogLevel(LogError)
+	}
+
 	// Per-open options arrived after enumeration and have the same problem: a
 	// library from an older release does not export the symbol, and
 	// RegisterLibFunc panics rather than reporting that. Probed separately from
@@ -169,6 +177,17 @@ func init() {
 	purego.RegisterLibFunc(&device_modes_pixel_format, lib, "device_modes_pixel_format")
 	purego.RegisterLibFunc(&device_modes_is_codec, lib, "device_modes_is_codec")
 	purego.RegisterLibFunc(&device_modes_free, lib, "device_modes_free")
+}
+
+// av_log_set_level is nil against a library that does not export it.
+var av_log_set_level func(level int32)
+
+func setLogLevel(level LogLevel) error {
+	if av_log_set_level == nil {
+		return ErrLogLevelUnavailable
+	}
+	av_log_set_level(int32(level))
+	return nil
 }
 
 // listDeviceModes mirrors the cgo backend, reading the list through the
