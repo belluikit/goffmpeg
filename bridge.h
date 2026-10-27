@@ -42,11 +42,18 @@ typedef struct {
     AVIOContext *avio_ctx;
     unsigned char *avio_buf;
     int64_t reader_handle;
+
+    // Set once decoder_next has handed out swresample's buffered tail at the
+    // end of the input; cleared by a seek or a resampler rebuild (#24).
+    int swr_flushed;
 } Decoder;
 
 // NOTE: decoder_purego.go mirrors this struct field-for-field in Go, and the C
 // side memsets it by sizeof(Decoder) over that Go allocation. Any field added
 // here MUST be added to cDecoder as well, or the memset overruns the Go object.
+// decoder_struct_size reports sizeof(Decoder) so a purego test can catch the
+// two drifting apart.
+int decoder_struct_size(void);
 
 // decoder_setup_streams is shared by every entry point below; it is exposed
 // (rather than static) so bridge_reader.c can reuse it.

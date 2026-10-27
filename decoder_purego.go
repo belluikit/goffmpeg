@@ -42,6 +42,7 @@ type cDecoder struct {
 	avio_ctx      uintptr
 	avio_buf      uintptr
 	reader_handle int64
+	swr_flushed   int32
 }
 
 // The bridge returns C int, which is 32 bits. These must be declared int32,
@@ -63,6 +64,10 @@ var (
 	decoder_seek            func(d *cDecoder, seconds float64) int32
 
 	decoder_set_audio_channels func(d *cDecoder, channels int32) int32
+
+	// nil against a libgoffmpeg older than #24. Only TestDecoderStructSize
+	// calls it, to catch cDecoder drifting from the C struct it mirrors.
+	decoder_struct_size func() int32
 
 	// These mirror the C signatures exactly, int32 for C int: the return
 	// register's upper half is not sign-extended, so binding a C int as Go int
@@ -145,6 +150,10 @@ func init() {
 	// behaves identically.
 	if hasSymbol(lib, "decoder_open_device_err") {
 		purego.RegisterLibFunc(&decoder_open_device_err, lib, "decoder_open_device_err")
+	}
+
+	if hasSymbol(lib, "decoder_struct_size") {
+		purego.RegisterLibFunc(&decoder_struct_size, lib, "decoder_struct_size")
 	}
 
 	// Device enumeration arrived after the shared bridge started shipping

@@ -125,6 +125,7 @@ int decoder_set_audio_channels(Decoder *d, int channels) {
     }
 
     d->channels = out_layout.nb_channels;
+    d->swr_flushed = 0;
     av_channel_layout_uninit(&out_layout);
     return 0;
 }
@@ -199,8 +200,16 @@ int decoder_seek(Decoder *d, double seconds) {
     if (ret < 0) return ret;
     if (d->v_ctx) avcodec_flush_buffers(d->v_ctx);
     if (d->a_ctx) avcodec_flush_buffers(d->a_ctx);
+    // swresample still holds samples from before the seek, which would come
+    // out after it; reinitialising discards them (#24).
+    if (d->swr_ctx) swr_init(d->swr_ctx);
+    d->swr_flushed = 0;
     d->position = seconds;
     return 0;
+}
+
+int decoder_struct_size(void) {
+    return (int)sizeof(Decoder);
 }
 
 // frame_position sets d->position from a decoded frame of stream idx.
@@ -253,7 +262,22 @@ int decoder_next(Decoder *d) {
             if (ret < 0 && ret != AVERROR_EOF) return ret;
             a_done = ret == AVERROR_EOF;
         }
-        if (v_done && a_done) return 0;
+        if (v_done && a_done) {
+            // A rate conversion leaves swresample holding a few samples that
+            // only a flush releases, so they come out once more as a last
+            // audio frame with no samples of its own, which decoder_get_audio
+            // turns into the flush (#24). The flag is set here rather than in
+            // decoder_get_audio, so a caller that never asks for audio still
+            // reaches the end.
+            if (d->a_frame && d->swr_ctx && !d->swr_flushed) {
+                d->swr_flushed = 1;
+                if (swr_get_delay(d->swr_ctx, d->sample_rate) > 0) {
+                    av_frame_unref(d->a_frame);
+                    return 2;
+                }
+            }
+            return 0;
+        }
 
         int ret = av_read_frame(d->fmt_ctx, d->pkt);
         // EAGAIN is a non-blocking device saying "not yet" and must not be
@@ -318,8 +342,10 @@ int decoder_get_audio(Decoder *d, uint8_t **buffer) {
         }
         d->audio_buf_size = out_size;
     }
-    int ret = swr_convert(d->swr_ctx, &d->audio_buf, out_samples,
-                          (const uint8_t **)d->a_frame->data, d->a_frame->nb_samples);
+    // A frame with no samples is the end-of-stream one decoder_next hands out
+    // (#24). swresample flushes only on a NULL input, not on a count of 0.
+    const uint8_t **in = d->a_frame->nb_samples > 0 ? (const uint8_t **)d->a_frame->data : NULL;
+    int ret = swr_convert(d->swr_ctx, &d->audio_buf, out_samples, in, d->a_frame->nb_samples);
     if (ret < 0) return ret;
     *buffer = d->audio_buf;
     // Bytes produced: samples x channels x 2 (S16). This was hardcoded to
