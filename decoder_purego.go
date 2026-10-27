@@ -42,6 +42,7 @@ type cDecoder struct {
 	avio_ctx      uintptr
 	avio_buf      uintptr
 	reader_handle int64
+	swr_flushed   int32
 }
 
 // The bridge returns C int, which is 32 bits. These must be declared int32,
