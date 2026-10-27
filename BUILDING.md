@@ -177,6 +177,21 @@ across platforms is not supported, and re-check `patches/` below: `make dist`
 stops with an error if one no longer applies, which is the moment to rebase it
 or drop it because upstream fixed it.
 
+Before publishing libraries built from the new revision, tag it in
+[belluikit/ffmpeg](https://github.com/belluikit/ffmpeg), our mirror of FFmpeg,
+and point every companion `NOTICE` at that tag. The libraries are LGPL-2.1,
+which asks for the corresponding source to be offered from the same place as
+the binaries, so a NOTICE linking only upstream depends on a repository we do
+not control. Old tags stay as long as anything built from them is published:
+
+```sh
+git -C ../ffmpeg push https://github.com/belluikit/ffmpeg.git \
+  <sha>:refs/tags/goffmpeg-<short sha>
+```
+
+A non-empty `patches/` is part of that source too: commit the patches onto the
+revision in the mirror and tag that commit instead.
+
 ## Local FFmpeg patches
 
 `patches/*.patch` are applied to the pinned checkout by `make dist`, in
