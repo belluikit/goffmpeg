@@ -23,8 +23,13 @@ DIST_DIR  := $(DIST_ROOT)/$(TARGET)
 BUILD_DIR := $(BUILD_ROOT)/$(TARGET)
 
 # Common flags. See the note in FFMPEG_CONF below on why autodetect stays off.
+#
+# The prefix is neutral and `make install` adds DESTDIR, so the files still land
+# in $(DIST_DIR). FFmpeg records its configure line in the libraries and reports
+# it at runtime (avutil_configuration), and an absolute prefix put the build
+# machine's home directory into every published library (goffmpeg-libs#6).
 BASE_CONF = \
-	--prefix="$(DIST_DIR)" \
+	--prefix="/$(TARGET)" \
 	--extra-cflags="-fPIC" \
 	--enable-pic \
 	--disable-autodetect \
@@ -152,7 +157,7 @@ endif
 FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF)
 
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
-        bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers
+        bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths
 
 # `all` builds the host target only. Use dist-all for the full matrix.
 all: dist
@@ -206,7 +211,7 @@ dist: check-src patch-src
 	@mkdir -p "$(BUILD_DIR)"
 	cd "$(BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) --enable-static --disable-shared
 	$(MAKE) -C "$(BUILD_DIR)" -j$(NPROC)
-	$(MAKE) -C "$(BUILD_DIR)" install
+	$(MAKE) -C "$(BUILD_DIR)" install DESTDIR="$(DIST_ROOT)"
 	@echo "==> $(TARGET) installed to $(DIST_DIR)"
 
 # Every target this host can build without a container or extra toolchain.
@@ -249,6 +254,10 @@ ifneq ($(filter darwin_%,$(TARGET)),)
 	# shared-library link is the path that has to be told, and omitting it
 	# fails only at link time with an undefined goffmpeg_avf_collect_modes.
 	BRIDGE_EXTRA_SRC = bridge_avf_darwin.m
+	# The linker records the output path as the dylib's install name, which
+	# put the CI runner's checkout path into the published library. purego
+	# opens it by file path, so the install name is never used to find it.
+	BRIDGE_LDFLAGS = -install_name @rpath/libgoffmpeg.dylib
 endif
 ifneq ($(filter linux_%,$(TARGET)),)
 	# -Bsymbolic binds the FFmpeg symbols inside this object rather than
@@ -286,13 +295,30 @@ WIN_SYSLIBS = -lsecur32 -lbcrypt -lws2_32 -lole32 -loleaut32 -lstrmiids -luuid \
 # into a sibling checkout of that repository.
 LIBS_REPO ?= $(ROOT)/../goffmpeg-libs
 
-sync-libs:
+sync-libs: check-paths
 	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	@mkdir -p "$(LIBS_REPO)/$(TARGET)/lib"
 	cp "$(DIST_DIR)"/lib/*.a "$(LIBS_REPO)/$(TARGET)/lib/"
 	@cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" 2>/dev/null && \
 		echo "    (including the purego shared bridge)" || true
 	@echo "==> $(TARGET) libraries synced to $(LIBS_REPO)/$(TARGET)"
+
+# check-paths refuses a build whose libraries name a personal home directory.
+# Configure lines, toolchain paths and install names all end up inside the
+# published binaries, and self-hosted and local builds put their user's name
+# there (goffmpeg-libs#6). GitHub-hosted runners build as the generic `runner`,
+# which is allowed: the Android NDK and llvm-mingw's own CRT carry such paths
+# and cannot be told not to. "FFmpeg version" must be found in libavutil.a, so
+# a scan that reads nothing fails instead of passing.
+check-paths:
+	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
+	@LC_ALL=C grep -qa 'FFmpeg version' "$(DIST_DIR)/lib/libavutil.a" || { \
+		echo "check-paths: 'FFmpeg version' not found in libavutil.a, so the scan is not reading the libraries"; exit 1; }
+	@bad=$$(for f in "$(DIST_DIR)"/lib/*; do \
+		LC_ALL=C grep -aoE '/(Users|home)/[A-Za-z0-9._-]+/' "$$f" | grep -vxE '/(Users|home)/runner/' | sed "s|^|$$(basename $$f): |"; \
+		done | sort | uniq -c); \
+	if [ -n "$$bad" ]; then echo "check-paths: $(TARGET) libraries name a personal home directory:"; echo "$$bad"; exit 1; fi
+	@echo "==> $(TARGET): no personal home directories in lib/"
 
 # The FFmpeg public headers are identical for every target, so one copy lives
 # in this module and all platforms compile against it.

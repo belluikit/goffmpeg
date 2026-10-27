@@ -40,6 +40,15 @@ make sync-libs TARGET=linux_amd64   # copy into ../goffmpeg-libs
 machine can produce without a container. `make sync-headers` refreshes the
 shared headers after an FFmpeg bump.
 
+`sync-libs` first runs `make check-paths`, which refuses libraries that name a
+personal home directory. FFmpeg records its configure line inside the libraries,
+toolchain paths included, and the linker records a dylib's output path, so a
+build made under `/Users/<you>` publishes that name. FFmpeg is configured with
+the neutral prefix `/<target>` for this reason. A local Android build still
+fails the check, because the NDK path is in the configure line. Publish
+libraries from CI, whose GitHub-hosted runners build as the generic `runner`
+user.
+
 Then tag the companion module — nested modules take a `<subdir>/vX.Y.Z` tag —
 and bump the requirement in this module's `go.mod`:
 
