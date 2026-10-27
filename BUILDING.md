@@ -240,7 +240,7 @@ which every desktop companion module now ships. Build one with
 `make bridge-shared TARGET=<target>`; it embeds the static FFmpeg libraries, so
 the result is a single self-contained object.
 
-Two flags matter for it, both learned the hard way:
+Three flags matter for it, all learned the hard way:
 
 - **`--enable-pic`** — `--extra-cflags=-fPIC` covers the C only. FFmpeg's
   hand-written assembly needs FFmpeg's own flag, or linking the static
@@ -250,6 +250,10 @@ Two flags matter for it, both learned the hard way:
   interposed at load time. Without it the linker reports
   "may bind externally ... recompile with -fPIC", which is misleading: the
   objects are already PIC.
+- **`-static-libgcc`** for windows_amd64 — mingw-w64 GCC otherwise links its
+  runtime as `libgcc_s_seh-1.dll`, which Windows does not ship, so the DLL
+  loads only where MinGW is on `PATH`. CI's Windows runners have it, which is
+  why the build now checks the DLL's imports against what Windows ships.
 
 ## Network sources
 

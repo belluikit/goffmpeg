@@ -262,6 +262,11 @@ ifneq ($(filter linux_%,$(TARGET)),)
 endif
 ifeq ($(TARGET),windows_amd64)
 	BRIDGE_CC = x86_64-w64-mingw32-gcc
+	# mingw-w64 GCC links its runtime as libgcc_s_seh-1.dll by default, which
+	# Windows does not ship and the companion module does not carry, so the
+	# DLL would load only where MinGW happens to be on PATH (#26). llvm-mingw,
+	# used for windows_arm64, has no such dependency.
+	BRIDGE_LDFLAGS = -static-libgcc
 	BRIDGE_SYSLIBS = $(WIN_SYSLIBS)
 endif
 ifeq ($(TARGET),windows_arm64)

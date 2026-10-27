@@ -283,6 +283,28 @@ jobs:
       - name: Shared bridge ${{ matrix.target }}
         run: make bridge-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw
 
+      # purego dlopens the bridge on machines that have nothing but Windows, so
+      # every DLL it imports must ship with Windows. The test legs cannot catch
+      # a stray one: GitHub's Windows runners have MinGW on PATH, and that is
+      # how a dependency on libgcc_s_seh-1.dll shipped unnoticed (#26). An
+      # empty import list fails too, so a broken read cannot pass as clean.
+      - name: Check the bridge's DLL imports
+        if: startsWith(matrix.target, 'windows_')
+        run: |
+          case "${{ matrix.target }}" in
+            windows_amd64) OBJDUMP=x86_64-w64-mingw32-objdump ;;
+            windows_arm64) OBJDUMP=/opt/llvm-mingw/bin/llvm-objdump ;;
+          esac
+          DLL=internal/libav/dist/${{ matrix.target }}/lib/libgoffmpeg.dll
+          imports=$($OBJDUMP -p "$DLL" | awk '/DLL Name:/{print $3}' | sort -fu)
+          if [ -z "$imports" ]; then echo "::error::read no imports from $DLL"; exit 1; fi
+          echo "$imports"
+          bad=$(echo "$imports" | grep -viE '^(api-ms-win-crt-[a-z0-9-]+|avicap32|bcrypt|crypt32|gdi32|kernel32|mfplat|msvcrt|ncrypt|ole32|oleaut32|secur32|shlwapi|user32|ws2_32)\.dll$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::$DLL imports DLLs Windows does not ship: $(echo $bad)"
+            exit 1
+          fi
+
       # actions/checkout cannot place a second repository outside the workspace,
       # and sync-libs alone copies only lib/ — leaving no go.mod for the
       # replace to point at. Cloning the companion repo gives a real module;
