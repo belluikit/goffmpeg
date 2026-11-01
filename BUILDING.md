@@ -108,13 +108,13 @@ that were skipping on `Err*Unavailable` should start running.
 | `darwin_amd64` | Xcode CLT, nasm | Cross-compiled from arm64 via `clang -arch x86_64` |
 | `ios_arm64` | Xcode iPhoneOS SDK | No avdevice; VideoToolbox hardware decode |
 | `iossimulator_arm64` | Xcode iPhoneSimulator SDK | Simulator slice |
-| `android_arm64` | Android NDK r26+ | MediaCodec via JNI |
-| `android_arm` | Android NDK r26+ | armeabi-v7a |
-| `android_amd64` | Android NDK r26+ | Emulator |
+| `android_arm64` | Android NDK r26+ | MediaCodec via JNI, no TLS |
+| `android_arm` | Android NDK r26+ | armeabi-v7a, no TLS |
+| `android_amd64` | Android NDK r26+ | Emulator, no TLS |
 | `linux_amd64` | gcc, nasm, libssl-dev | OpenSSL for https, v4l2 capture |
-| `linux_arm64` | gcc, nasm, libssl-dev | |
+| `linux_arm64` | gcc, nasm, libssl-dev | OpenSSL for https, v4l2 capture |
 | `windows_amd64` | mingw-w64 | Schannel for TLS, dshow capture |
-| `windows_arm64` | llvm-mingw | Distro mingw-w64 is x86 only |
+| `windows_arm64` | llvm-mingw | Schannel for TLS, dshow capture; distro mingw-w64 is x86 only |
 
 `make linux-docker TARGET=linux_amd64` builds the Linux targets in a container
 when the host has no cross toolchain.
@@ -265,6 +265,11 @@ Three flags matter for it, all learned the hard way:
   why the build now checks the DLL's imports against what Windows ships.
 
 ## Network sources
+
+The Android libraries have no TLS, so `https` URLs fail to open there with
+`failed to open decoder: -1`. Plain `http` works, and `OpenReader` can take
+`https` read through Go, but not HLS, because FFmpeg has to fetch the segments
+itself.
 
 `Open` takes a path or a URL, and for http, https and HLS the defaults are not
 enough on a real network. `OpenWithOptions` passes a comma-separated
