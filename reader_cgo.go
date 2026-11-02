@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -30,6 +31,9 @@ type readerState struct {
 	r      io.Reader
 	seeker io.Seeker
 	size   int64 // -1 when unknown
+	// interrupted is set by the decoder's Interrupt; the read and seek
+	// callbacks then fail without calling into r.
+	interrupted atomic.Bool
 }
 
 var (
@@ -59,6 +63,13 @@ func unregisterReader(h int64) {
 	delete(readers, h)
 }
 
+// interruptReader makes every later read and seek of h fail.
+func interruptReader(h int64) {
+	if rs := lookupReader(h); rs != nil {
+		rs.interrupted.Store(true)
+	}
+}
+
 // registrySize reports how many readers are currently held. Used by the tests
 // to assert that Close releases them.
 func registrySize() int {
@@ -70,14 +81,14 @@ func registrySize() int {
 //export goffmpegReaderRead
 func goffmpegReaderRead(handle C.int64_t, buf *C.uint8_t, bufSize C.int) C.int {
 	rs := lookupReader(int64(handle))
-	if rs == nil || bufSize <= 0 {
+	if rs == nil || bufSize <= 0 || rs.interrupted.Load() {
 		return -1
 	}
 	dst := unsafe.Slice((*byte)(unsafe.Pointer(buf)), int(bufSize))
 
 	// A reader is allowed to return (0, nil) without being at EOF, but C sees
 	// 0 as end-of-stream — so keep pulling until there is data or a verdict.
-	for {
+	for !rs.interrupted.Load() {
 		n, err := rs.r.Read(dst)
 		if n > 0 {
 			return C.int(n)
@@ -89,12 +100,13 @@ func goffmpegReaderRead(handle C.int64_t, buf *C.uint8_t, bufSize C.int) C.int {
 			return -1
 		}
 	}
+	return -1
 }
 
 //export goffmpegReaderSeek
 func goffmpegReaderSeek(handle C.int64_t, offset C.int64_t, whence C.int) C.int64_t {
 	rs := lookupReader(int64(handle))
-	if rs == nil {
+	if rs == nil || rs.interrupted.Load() {
 		return -1
 	}
 

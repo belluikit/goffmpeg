@@ -46,6 +46,12 @@ typedef struct {
     // Set once decoder_next has handed out swresample's buffered tail at the
     // end of the input; cleared by a seek or a resampler rebuild (#24).
     int swr_flushed;
+
+    // The flag fmt_ctx's interrupt callback reads; decoder_interrupt sets it.
+    // It is allocated in C rather than kept in this struct because the struct
+    // lives in Go memory, and FFmpeg holds the callback's opaque pointer for
+    // the life of fmt_ctx, which cgo forbids for a Go pointer.
+    int *interrupt;
 } Decoder;
 
 // NOTE: decoder_purego.go mirrors this struct field-for-field in Go, and the C
@@ -106,6 +112,17 @@ int decoder_open_device_err(Decoder *d, const char *format, const char *url,
 int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const char *options);
 int decoder_open_reader(Decoder *d, int64_t handle, int seekable);
 int decoder_seek(Decoder *d, double seconds);
+// decoder_interrupt makes FFmpeg abandon whatever blocking I/O d is in, and
+// every later one: an open, av_read_frame or av_seek_frame on a network input
+// returns AVERROR_EXIT at its next interrupt check instead of finishing. It is
+// the one call that may be made from another thread while d is in use; it is
+// for tearing d down, and after it d is only good for decoder_close.
+void decoder_interrupt(Decoder *d);
+// decoder_alloc_context gives d its interrupt flag and an empty format context
+// whose interrupt callback reads it. Every open entry point calls it before
+// avformat_open_input, which keeps the callback for the protocol it opens.
+// Returns 0, or -4 / -6 when either allocation fails.
+int decoder_alloc_context(Decoder *d);
 // decoder_set_audio_channels rebuilds the resampler to emit `channels`
 // interleaved S16 channels; 0 keeps the stream's native layout. Call before
 // playback begins — rebuilding drops whatever swresample had buffered.

@@ -16,7 +16,14 @@ func TestDecoderStructSize(t *testing.T) {
 	if decoder_struct_size == nil {
 		t.Skip("libgoffmpeg predates decoder_struct_size (#24); rebuild it to run this")
 	}
-	if c, g := int(decoder_struct_size()), int(unsafe.Sizeof(cDecoder{})); c != g {
-		t.Fatalf("sizeof(Decoder) = %d in C, unsafe.Sizeof(cDecoder{}) = %d in Go", c, g)
+	g := int(unsafe.Sizeof(cDecoder{}))
+	// A library from before decoder_interrupt has no interrupt field; its
+	// struct ends where that field begins. The Go mirror being larger than
+	// such a library's struct is safe: its memset covers less.
+	if decoder_interrupt == nil {
+		g = int(unsafe.Offsetof(cDecoder{}.interrupt))
+	}
+	if c := int(decoder_struct_size()); c != g {
+		t.Fatalf("sizeof(Decoder) = %d in C, %d in Go", c, g)
 	}
 }

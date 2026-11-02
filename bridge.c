@@ -130,6 +130,24 @@ int decoder_set_audio_channels(Decoder *d, int channels) {
     return 0;
 }
 
+static int decoder_interrupt_cb(void *opaque) {
+    return __atomic_load_n((int *)opaque, __ATOMIC_ACQUIRE);
+}
+
+int decoder_alloc_context(Decoder *d) {
+    d->interrupt = av_mallocz(sizeof(int));
+    if (!d->interrupt) return -4;
+    d->fmt_ctx = avformat_alloc_context();
+    if (!d->fmt_ctx) return -6;
+    d->fmt_ctx->interrupt_callback.callback = decoder_interrupt_cb;
+    d->fmt_ctx->interrupt_callback.opaque = d->interrupt;
+    return 0;
+}
+
+void decoder_interrupt(Decoder *d) {
+    if (d->interrupt) __atomic_store_n(d->interrupt, 1, __ATOMIC_RELEASE);
+}
+
 int decoder_open_opts(Decoder *d, const char *url, const char *options) {
     memset(d, 0, sizeof(Decoder));
     d->v_stream_idx = -1;
@@ -145,7 +163,12 @@ int decoder_open_opts(Decoder *d, const char *url, const char *options) {
     // rejected, and that is the right behaviour here: an option is consumed by
     // whichever layer claims it, so "reconnect=1" is meaningful for http and
     // simply unused for a local file. The caller passes one string for both.
-    int rc = avformat_open_input(&d->fmt_ctx, url, NULL, &opts);
+    int rc = decoder_alloc_context(d);
+    if (rc < 0) {
+        av_dict_free(&opts);
+        return rc;
+    }
+    rc = avformat_open_input(&d->fmt_ctx, url, NULL, &opts);
     av_dict_free(&opts);
     if (rc < 0) return -1;
 
@@ -171,9 +194,11 @@ int decoder_open_device_err(Decoder *d, const char *format, const char *url,
     const AVInputFormat *ifmt = av_find_input_format(format);
     if (!ifmt) return -3;
 
+    int rc = decoder_alloc_context(d);
+    if (rc < 0) return rc;
     AVDictionary *opts = NULL;
     if (options && options[0]) av_dict_parse_string(&opts, options, "=", ",", 0);
-    int rc = avformat_open_input(&d->fmt_ctx, url, ifmt, &opts);
+    rc = avformat_open_input(&d->fmt_ctx, url, ifmt, &opts);
     av_dict_free(&opts);
     if (rc < 0) {
         // The AVERROR goes out through averr rather than the return value.
@@ -371,6 +396,7 @@ void decoder_close(Decoder *d) {
         avio_context_free(&d->avio_ctx);
         d->avio_buf = NULL;
     }
+    av_freep(&d->interrupt);
 }
 
 // ---------------------------------------------------------------------------

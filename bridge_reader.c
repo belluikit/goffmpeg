@@ -53,13 +53,9 @@ int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const cha
     }
     if (!seekable) d->avio_ctx->seekable = 0;
 
-    d->fmt_ctx = avformat_alloc_context();
-    if (!d->fmt_ctx) {
-        av_freep(&d->avio_ctx->buffer);
-        avio_context_free(&d->avio_ctx);
-        d->avio_buf = NULL;
-        return -6;
-    }
+    // On failure decoder_close reclaims the AVIOContext and the flag.
+    int rc = decoder_alloc_context(d);
+    if (rc < 0) return rc;
     d->fmt_ctx->pb = d->avio_ctx;
     d->fmt_ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
 
@@ -72,7 +68,7 @@ int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const cha
     // url=NULL: the format is probed through pb rather than inferred from a
     // filename. On failure avformat_open_input frees fmt_ctx and NULLs it, but
     // leaves the AVIOContext for decoder_close to reclaim.
-    int rc = avformat_open_input(&d->fmt_ctx, NULL, NULL, &opts);
+    rc = avformat_open_input(&d->fmt_ctx, NULL, NULL, &opts);
     av_dict_free(&opts);
     if (rc < 0) return -1;
     return decoder_setup_streams(d);
