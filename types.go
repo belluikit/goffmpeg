@@ -304,6 +304,11 @@ func (e AVError) Error() string {
 // naming the value if it ever arrives by another route.
 const avErrorEOF AVError = -('E' | 'O'<<8 | 'F'<<16 | ' '<<24)
 
+// avErrorExit mirrors AVERROR_EXIT, FFERRTAG('E','X','I','T'): what FFmpeg
+// returns from an operation its interrupt callback stopped. Seek and Next
+// report it after Interrupt even where FFmpeg did not check (#37).
+const avErrorExit AVError = -('E' | 'X'<<8 | 'I'<<16 | 'T'<<24)
+
 // goffmpegAgain mirrors GOFFMPEG_AGAIN in bridge.h.
 const goffmpegAgain = 3
 

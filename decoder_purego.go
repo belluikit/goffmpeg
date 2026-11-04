@@ -299,6 +299,8 @@ type puregoDecoder struct {
 	// mu orders Interrupt against Close, which frees the flag Interrupt sets.
 	mu     sync.Mutex
 	closed bool
+
+	interrupted interruptState
 }
 
 func openDecoder(url, options string) (IDecoder, error) {
@@ -377,7 +379,7 @@ func (d *puregoDecoder) Position() float64 {
 }
 
 func (d *puregoDecoder) Next() (MediaType, error) {
-	return nextResult(int(decoder_next(&d.d)))
+	return d.interrupted.nextResult(int(decoder_next(&d.d)))
 }
 
 func (d *puregoDecoder) GetRGBA(rgba *image.RGBA) error {
@@ -409,6 +411,7 @@ func (d *puregoDecoder) Interrupt() {
 		return
 	}
 	decoder_interrupt(&d.d)
+	d.interrupted.set.Store(true)
 }
 
 func (d *puregoDecoder) Close() {
@@ -446,8 +449,5 @@ func (d *puregoDecoder) Seek(seconds float64) error {
 	if decoder_seek == nil {
 		return errors.New("library not loaded")
 	}
-	if res := int(decoder_seek(&d.d, seconds)); res < 0 {
-		return fmt.Errorf("seek failed: %d", res)
-	}
-	return nil
+	return d.interrupted.seekResult(int(decoder_seek(&d.d, seconds)))
 }

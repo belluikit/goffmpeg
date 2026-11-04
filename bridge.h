@@ -116,7 +116,10 @@ int decoder_seek(Decoder *d, double seconds);
 // every later one: an open, av_read_frame or av_seek_frame on a network input
 // returns AVERROR_EXIT at its next interrupt check instead of finishing. It is
 // the one call that may be made from another thread while d is in use; it is
-// for tearing d down, and after it d is only good for decoder_close.
+// for tearing d down, and after it d is only good for decoder_close:
+// decoder_seek and decoder_next return AVERROR_EXIT from then on, including
+// where FFmpeg would not have checked (a local file, a seek that fell back to
+// an index entry it already had; #37).
 void decoder_interrupt(Decoder *d);
 // decoder_alloc_context gives d its interrupt flag and an empty format context
 // whose interrupt callback reads it. Every open entry point calls it before
