@@ -379,8 +379,10 @@ func (d *puregoDecoder) Position() float64 {
 }
 
 func (d *puregoDecoder) Next() (MediaType, error) {
-	return d.interrupted.nextResult(int(decoder_next(&d.d)))
+	return d.interrupted.nextResult(d.bridgeNext())
 }
+
+func (d *puregoDecoder) bridgeNext() int { return int(decoder_next(&d.d)) }
 
 func (d *puregoDecoder) GetRGBA(rgba *image.RGBA) error {
 	if rgba == nil || len(rgba.Pix) == 0 {
@@ -449,5 +451,9 @@ func (d *puregoDecoder) Seek(seconds float64) error {
 	if decoder_seek == nil {
 		return errors.New("library not loaded")
 	}
-	return d.interrupted.seekResult(int(decoder_seek(&d.d, seconds)))
+	return d.interrupted.seekResult(d.bridgeSeek(seconds))
+}
+
+func (d *puregoDecoder) bridgeSeek(seconds float64) int {
+	return int(decoder_seek(&d.d, seconds))
 }
