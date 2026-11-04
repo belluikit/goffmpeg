@@ -148,6 +148,14 @@ void decoder_interrupt(Decoder *d) {
     if (d->interrupt) __atomic_store_n(d->interrupt, 1, __ATOMIC_RELEASE);
 }
 
+// FFmpeg consults the interrupt callback only on some I/O paths: a local file
+// never does, and a seek interrupted mid-read can fall back to an index entry
+// it already holds and succeed. So the calls that read check the flag
+// themselves, and an interrupted decoder fails them all (#37).
+static int decoder_interrupted(const Decoder *d) {
+    return d->interrupt && __atomic_load_n(d->interrupt, __ATOMIC_ACQUIRE);
+}
+
 int decoder_open_opts(Decoder *d, const char *url, const char *options) {
     memset(d, 0, sizeof(Decoder));
     d->v_stream_idx = -1;
@@ -219,10 +227,12 @@ int decoder_open_device(Decoder *d, const char *format, const char *url, const c
 }
 
 int decoder_seek(Decoder *d, double seconds) {
+    if (decoder_interrupted(d)) return AVERROR_EXIT;
     if (seconds < 0) seconds = 0;
     int64_t ts = (int64_t)(seconds * AV_TIME_BASE);
     int ret = av_seek_frame(d->fmt_ctx, -1, ts, AVSEEK_FLAG_BACKWARD);
     if (ret < 0) return ret;
+    if (decoder_interrupted(d)) return AVERROR_EXIT;
     if (d->v_ctx) avcodec_flush_buffers(d->v_ctx);
     if (d->a_ctx) avcodec_flush_buffers(d->a_ctx);
     // swresample still holds samples from before the seek, which would come
@@ -260,6 +270,7 @@ static int receive(AVCodecContext *ctx, AVFrame *f) {
 // last frames and a clip shorter than the thread count losing all of them
 // (#22). v_frame and a_frame mark a decoder that opened.
 int decoder_next(Decoder *d) {
+    if (decoder_interrupted(d)) return AVERROR_EXIT;
     for (;;) {
         int v_done = 1, a_done = 1;
         if (d->v_frame) {

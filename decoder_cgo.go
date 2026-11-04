@@ -32,6 +32,8 @@ type cgoDecoder struct {
 	// concurrently with the rest.
 	mu     sync.Mutex
 	closed bool
+
+	interrupted interruptState
 }
 
 func openDecoder(url, options string) (IDecoder, error) {
@@ -164,8 +166,10 @@ func (d *cgoDecoder) Position() float64 {
 }
 
 func (d *cgoDecoder) Next() (MediaType, error) {
-	return nextResult(int(C.decoder_next(&d.d)))
+	return d.interrupted.nextResult(d.bridgeNext())
 }
+
+func (d *cgoDecoder) bridgeNext() int { return int(C.decoder_next(&d.d)) }
 
 func (d *cgoDecoder) GetRGBA(rgba *image.RGBA) error {
 	if rgba == nil || len(rgba.Pix) == 0 {
@@ -199,6 +203,7 @@ func (d *cgoDecoder) Interrupt() {
 		interruptReader(d.handle)
 	}
 	C.decoder_interrupt(&d.d)
+	d.interrupted.set.Store(true)
 }
 
 func (d *cgoDecoder) Close() {
@@ -233,8 +238,9 @@ func (d *cgoDecoder) SetAudioSampleRate(rate int) error {
 }
 
 func (d *cgoDecoder) Seek(seconds float64) error {
-	if res := C.decoder_seek(&d.d, C.double(seconds)); res < 0 {
-		return fmt.Errorf("seek failed: %d", res)
-	}
-	return nil
+	return d.interrupted.seekResult(d.bridgeSeek(seconds))
+}
+
+func (d *cgoDecoder) bridgeSeek(seconds float64) int {
+	return int(C.decoder_seek(&d.d, C.double(seconds)))
 }
