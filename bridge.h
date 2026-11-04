@@ -139,7 +139,16 @@ int decoder_set_audio_channels(Decoder *d, int channels);
 // dependent — 11 on Linux, 35 on macOS — so only the C side, where the errno
 // macro is the right one for the build, can recognise it reliably.
 #define GOFFMPEG_AGAIN 3
-int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, <0=Error
+// GOFFMPEG_TRUNCATED means the input ended before the end of the stream, in a
+// way FFmpeg itself reports as a clean end of file. FFmpeg's http, after a
+// connection drops mid-file, reconnects with Range; when the server answers
+// that request with an error (an expired signed link: 403), the protocol
+// returns the end of file it had before the reconnect, and records nothing.
+// The trace it leaves is the size: avio_size now describes the error
+// response, so the position is past it. A clean end has the position at the
+// size, and a demuxer that stops before trailing bytes leaves it short.
+#define GOFFMPEG_TRUNCATED 4
+int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, <0=Error
 int decoder_get_rgba(Decoder *d, uint8_t *buffer);
 int decoder_get_audio(Decoder *d, uint8_t **buffer);
 void decoder_close(Decoder *d);

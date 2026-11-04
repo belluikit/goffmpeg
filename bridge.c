@@ -309,6 +309,12 @@ int decoder_next(Decoder *d) {
         // confused with either an end or a failure (#4).
         if (ret == AVERROR(EAGAIN)) return GOFFMPEG_AGAIN;
         if (ret == AVERROR_EOF) {
+            // An end that is really a refused reconnect (see GOFFMPEG_TRUNCATED).
+            AVIOContext *pb = d->fmt_ctx->pb;
+            if (pb) {
+                int64_t size = avio_size(pb);
+                if (size > 0 && avio_tell(pb) > size) return GOFFMPEG_TRUNCATED;
+            }
             // A NULL packet starts the drain. Sending it again once draining
             // returns AVERROR_EOF, which is harmless, so no state is kept.
             if (d->v_frame) avcodec_send_packet(d->v_ctx, NULL);
