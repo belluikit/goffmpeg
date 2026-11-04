@@ -307,6 +307,18 @@ const avErrorEOF AVError = -('E' | 'O'<<8 | 'F'<<16 | ' '<<24)
 // goffmpegAgain mirrors GOFFMPEG_AGAIN in bridge.h.
 const goffmpegAgain = 3
 
+// goffmpegTruncated mirrors GOFFMPEG_TRUNCATED in bridge.h.
+const goffmpegTruncated = 4
+
+// ErrStreamTruncated reports that the input stopped before the end of the
+// stream although FFmpeg called it the end of the file: over http, a
+// connection that dropped mid-file and a reconnect the server refused, as it
+// does once a signed link has expired (belluikit/player#237). Without it a
+// player took a song that stopped a minute in as finished. FFmpeg keeps the
+// server's answer to itself, so a caller that wants the status asks the
+// server again.
+var ErrStreamTruncated = errors.New("goffmpeg: the stream ended early: the input stopped before its end")
+
 // nextResult maps decoder_next's return code onto what Next reports. Both
 // backends go through it so they classify identically — the same reason
 // deviceListError exists.
@@ -321,6 +333,8 @@ func nextResult(res int) (MediaType, error) {
 	switch {
 	case res == goffmpegAgain, res == -errnoEAGAIN:
 		return MediaTypeNone, ErrAgain
+	case res == goffmpegTruncated:
+		return MediaTypeNone, ErrStreamTruncated
 	case res < 0:
 		return MediaTypeNone, AVError(res)
 	default:
