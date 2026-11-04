@@ -77,8 +77,8 @@ type IDecoder interface {
 	// should be cancelled by the caller as well.
 	//
 	// Under CGO_ENABLED=0 this needs a libgoffmpeg new enough to export
-	// decoder_interrupt; against an older one it does nothing, and the
-	// blocked call finishes as it would have.
+	// decoder_interrupt (goffmpeg-libs v0.3.4 or later); against an older one
+	// it does nothing, and the blocked call finishes as it would have.
 	Interrupt()
 	Close()
 }
