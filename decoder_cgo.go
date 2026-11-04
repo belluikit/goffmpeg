@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"sync"
 	"unsafe"
 )
 
@@ -25,6 +26,12 @@ type cgoDecoder struct {
 	// audio holds the caller's channel and rate requests, so rebuilding the
 	// resampler for one keeps the other.
 	audio audioRequest
+
+	// mu orders Interrupt against Close, which frees the flag Interrupt sets.
+	// Nothing else takes it: Interrupt is the only method that may run
+	// concurrently with the rest.
+	mu     sync.Mutex
+	closed bool
 }
 
 func openDecoder(url, options string) (IDecoder, error) {
@@ -36,6 +43,9 @@ func openDecoder(url, options string) (IDecoder, error) {
 
 	res := C.decoder_open_opts(&d.d, cUrl, cOpts)
 	if res != 0 {
+		// A failed open can leave the interrupt flag, and a format context
+		// whose streams could not be read, behind.
+		C.decoder_close(&d.d)
 		return nil, openError(res, options)
 	}
 	return d, nil
@@ -63,6 +73,7 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 	var averr C.int
 	res := C.decoder_open_device_err(&d.d, cFormat, cURL, cOpts, &averr)
 	if res != 0 {
+		C.decoder_close(&d.d)
 		return nil, openDeviceError(format, url, int(res), int(averr))
 	}
 	return d, nil
@@ -176,7 +187,24 @@ func (d *cgoDecoder) GetAudio() ([]byte, error) {
 	return C.GoBytes(unsafe.Pointer(ptr), C.int(size)), nil
 }
 
+func (d *cgoDecoder) Interrupt() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
+	// A reader-backed decoder is stopped on the Go side too: custom IO never
+	// consults FFmpeg's interrupt callback, so the reader callback has to.
+	if d.handle != 0 {
+		interruptReader(d.handle)
+	}
+	C.decoder_interrupt(&d.d)
+}
+
 func (d *cgoDecoder) Close() {
+	d.mu.Lock()
+	d.closed = true
+	d.mu.Unlock()
 	C.decoder_close(&d.d)
 	// Drop the reader from the registry only after the C side has torn down
 	// its AVIOContext, so no in-flight callback can miss it.

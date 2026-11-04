@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -43,6 +44,7 @@ type cDecoder struct {
 	avio_buf      uintptr
 	reader_handle int64
 	swr_flushed   int32
+	interrupt     uintptr
 }
 
 // The bridge returns C int, which is 32 bits. These must be declared int32,
@@ -62,6 +64,9 @@ var (
 	decoder_get_audio       func(d *cDecoder, buffer **byte) int32
 	decoder_close           func(d *cDecoder)
 	decoder_seek            func(d *cDecoder, seconds float64) int32
+	// nil against a libgoffmpeg older than decoder_interrupt; Interrupt then
+	// does nothing.
+	decoder_interrupt func(d *cDecoder)
 
 	decoder_set_audio_channels func(d *cDecoder, channels int32) int32
 
@@ -152,6 +157,9 @@ func init() {
 		purego.RegisterLibFunc(&decoder_open_device_err, lib, "decoder_open_device_err")
 	}
 
+	if hasSymbol(lib, "decoder_interrupt") {
+		purego.RegisterLibFunc(&decoder_interrupt, lib, "decoder_interrupt")
+	}
 	if hasSymbol(lib, "decoder_struct_size") {
 		purego.RegisterLibFunc(&decoder_struct_size, lib, "decoder_struct_size")
 	}
@@ -287,6 +295,10 @@ type puregoDecoder struct {
 	// audio holds the caller's channel and rate requests, so rebuilding the
 	// resampler for one keeps the other.
 	audio audioRequest
+
+	// mu orders Interrupt against Close, which frees the flag Interrupt sets.
+	mu     sync.Mutex
+	closed bool
 }
 
 func openDecoder(url, options string) (IDecoder, error) {
@@ -311,6 +323,9 @@ func openDecoder(url, options string) (IDecoder, error) {
 		res = int(decoder_open(&d.d, &cUrl[0]))
 	}
 	if res != 0 {
+		// A failed open can leave the interrupt flag, and a format context
+		// whose streams could not be read, behind.
+		decoder_close(&d.d)
 		if res == -8 {
 			return nil, fmt.Errorf("goffmpeg: malformed open options %q", options)
 		}
@@ -343,6 +358,7 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 		res = int(decoder_open_device(&d.d, &cFormat[0], &cURL[0], &cOpts[0]))
 	}
 	if res != 0 {
+		decoder_close(&d.d)
 		return nil, openDeviceError(format, url, res, int(averr))
 	}
 	return d, nil
@@ -386,7 +402,19 @@ func (d *puregoDecoder) GetAudio() ([]byte, error) {
 	return out, nil
 }
 
+func (d *puregoDecoder) Interrupt() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed || decoder_interrupt == nil {
+		return
+	}
+	decoder_interrupt(&d.d)
+}
+
 func (d *puregoDecoder) Close() {
+	d.mu.Lock()
+	d.closed = true
+	d.mu.Unlock()
 	decoder_close(&d.d)
 }
 

@@ -92,7 +92,7 @@ briefly before calling again.
 ## API overview
 
 All openers return an `IDecoder` (`VideoInfo`, `AudioInfo`, `Position`,
-`Duration`, `Seek`, `SetAudioChannels`, `SetAudioSampleRate`, `Next`, `GetRGBA`, `GetAudio`, `Close`).
+`Duration`, `Seek`, `SetAudioChannels`, `SetAudioSampleRate`, `Next`, `GetRGBA`, `GetAudio`, `Interrupt`, `Close`).
 
 | Function | Opens |
 |---|---|
@@ -110,6 +110,12 @@ or dropped connection hangs or ends playback:
 dec, err := goffmpeg.OpenWithOptions(url,
 	"rw_timeout=5000000,reconnect=1,reconnect_streamed=1,reconnect_delay_max=5")
 ```
+
+To stop a decoder that is blocked on the network (a far seek in an MP3 with no
+seek table reads the file through to the target), call `Interrupt` from
+another goroutine before `Close`: the blocked `Seek` or `Next` returns an
+error at FFmpeg's next interrupt check. A decoder from `OpenReader` stops at
+its next call to the reader, so cancel a reader that can block yourself.
 
 Capture devices per platform:
 

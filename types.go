@@ -62,6 +62,24 @@ type IDecoder interface {
 	Next() (MediaType, error)
 	GetRGBA(rgba *image.RGBA) error
 	GetAudio() ([]byte, error)
+	// Interrupt makes the decoder give up on the I/O it is blocked in, from
+	// another goroutine: a Seek or Next stuck reading a network input returns
+	// an error at FFmpeg's next interrupt check instead of when the read
+	// finishes. It is for teardown. Every later read fails too, so the only
+	// call that makes sense after it is Close. It is the one method that is
+	// safe to call concurrently with the others, Close included, and calling
+	// it more than once, or after Close, does nothing.
+	//
+	// FFmpeg checks for an interrupt between reads and while it waits on a
+	// socket, so a URL opened with Open or OpenWithOptions stops promptly. A
+	// decoder from OpenReader stops at its next call to r: a Read already in
+	// progress is r's to end, so a reader that can block (an HTTP body, say)
+	// should be cancelled by the caller as well.
+	//
+	// Under CGO_ENABLED=0 this needs a libgoffmpeg new enough to export
+	// decoder_interrupt; against an older one it does nothing, and the
+	// blocked call finishes as it would have.
+	Interrupt()
 	Close()
 }
 
