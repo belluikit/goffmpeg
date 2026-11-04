@@ -1,10 +1,3 @@
-//go:build cgo
-
-// cgo only: the purego leg dlopens the libgoffmpeg published in
-// goffmpeg-libs, which has GOFFMPEG_TRUNCATED only once those libraries are
-// rebuilt from this bridge. Until then purego reports such an end as clean,
-// as before.
-
 package goffmpeg
 
 import (
