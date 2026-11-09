@@ -33,7 +33,12 @@ static int find_video_stream(AVFormatContext *fmt) {
 int decoder_setup_streams(Decoder *d) {
     if (avformat_find_stream_info(d->fmt_ctx, NULL) < 0) return -2;
 
-    // Video stream
+    // Video stream: none in an audio-only build, whose video packets are
+    // then read and dropped (decoder_next sends a packet only to an open
+    // decoder).
+#ifdef GOFFMPEG_NO_VIDEO
+    d->v_stream_idx = -1;
+#else
     d->v_stream_idx = find_video_stream(d->fmt_ctx);
     if (d->v_stream_idx >= 0) {
         AVStream *st = d->fmt_ctx->streams[d->v_stream_idx];
@@ -57,6 +62,7 @@ int decoder_setup_streams(Decoder *d) {
             }
         }
     }
+#endif
 
     // Audio stream
     d->a_stream_idx = av_find_best_stream(d->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
@@ -344,6 +350,10 @@ int decoder_next(Decoder *d) {
 }
 
 int decoder_get_rgba(Decoder *d, uint8_t *buffer) {
+#ifdef GOFFMPEG_NO_VIDEO
+    (void)d; (void)buffer;
+    return -8;
+#else
     if (!d->v_frame) return -1;
     if (d->v_frame->width <= 0 || d->v_frame->height <= 0) return -1;
     if (d->v_frame->format == AV_PIX_FMT_NONE) return -1;
@@ -366,6 +376,7 @@ int decoder_get_rgba(Decoder *d, uint8_t *buffer) {
     int dst_linesize[4] = { d->width * 4, 0, 0, 0 };
     return sws_scale(d->sws_ctx, (const uint8_t * const*)d->v_frame->data, d->v_frame->linesize,
                      0, d->v_frame->height, dst_data, dst_linesize);
+#endif
 }
 
 int decoder_get_audio(Decoder *d, uint8_t **buffer) {
@@ -396,7 +407,9 @@ int decoder_get_audio(Decoder *d, uint8_t **buffer) {
 }
 
 void decoder_close(Decoder *d) {
+#ifndef GOFFMPEG_NO_VIDEO
     if (d->sws_ctx) sws_freeContext(d->sws_ctx);
+#endif
     if (d->swr_ctx) swr_free(&d->swr_ctx);
     if (d->v_frame) av_frame_free(&d->v_frame);
     if (d->a_frame) av_frame_free(&d->a_frame);

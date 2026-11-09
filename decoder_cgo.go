@@ -175,7 +175,9 @@ func (d *cgoDecoder) GetRGBA(rgba *image.RGBA) error {
 	if rgba == nil || len(rgba.Pix) == 0 {
 		return errors.New("invalid buffer")
 	}
-	C.decoder_get_rgba(&d.d, (*C.uint8_t)(unsafe.Pointer(&rgba.Pix[0])))
+	if C.decoder_get_rgba(&d.d, (*C.uint8_t)(unsafe.Pointer(&rgba.Pix[0]))) == -8 {
+		return ErrVideoNotBuilt
+	}
 	return nil
 }
 

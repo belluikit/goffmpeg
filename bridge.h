@@ -11,7 +11,13 @@
 #endif
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
+// An audio-only build (the goffmpeg_novideo tag, which defines
+// GOFFMPEG_NO_VIDEO) opens no video stream and never calls libswscale, so
+// nothing of it is linked. The struct keeps its sws_ctx field either way: the
+// purego decoder mirrors this layout field for field.
+#ifndef GOFFMPEG_NO_VIDEO
 #include <libswscale/swscale.h>
+#endif
 #include <libswresample/swresample.h>
 
 typedef struct {
@@ -152,6 +158,7 @@ int decoder_set_audio_channels(Decoder *d, int channels);
 // size, and a demuxer that stops before trailing bytes leaves it short.
 #define GOFFMPEG_TRUNCATED 4
 int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, <0=Error
+// decoder_get_rgba returns -8 in a build without video (GOFFMPEG_NO_VIDEO).
 int decoder_get_rgba(Decoder *d, uint8_t *buffer);
 int decoder_get_audio(Decoder *d, uint8_t **buffer);
 void decoder_close(Decoder *d);
