@@ -54,9 +54,19 @@ func linkedFFmpeg(t *testing.T) map[string]bool {
 			t.Fatal(err)
 		}
 		defer f.Close()
-		imports, err = f.ImportedLibraries()
+		// debug/pe's ImportedLibraries is a stub that returns nothing (a
+		// TODO in Go's source), so the DLLs come from the imported symbols,
+		// which it reports as "symbol:dll".
+		syms, err := f.ImportedSymbols()
 		if err != nil {
 			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, s := range syms {
+			if _, dll, ok := strings.Cut(s, ":"); ok && !seen[dll] {
+				seen[dll] = true
+				imports = append(imports, dll)
+			}
 		}
 	default:
 		t.Skipf("imported libraries not read on %s", runtime.GOOS)
