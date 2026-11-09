@@ -53,8 +53,14 @@ type cDecoder struct {
 // arrives zero-extended. Declaring int turns a -1 into 4294967295 and silently
 // kills every `if res < 0` check. Convert at the call site instead.
 var (
-	decoder_open        func(d *cDecoder, url *byte) int32
-	decoder_open_opts   func(d *cDecoder, url *byte, options *byte) int32
+	decoder_open      func(d *cDecoder, url *byte) int32
+	decoder_open_opts func(d *cDecoder, url *byte, options *byte) int32
+	// nil against a libgoffmpeg older than #41; openDecoder falls back to
+	// decoder_open_opts and has no AVERROR to report.
+	decoder_open_opts_err func(d *cDecoder, url *byte, options *byte, averr *int32) int32
+	// nil against a libgoffmpeg older than #41; MissingDecoder then reads
+	// empty, and ErrNoDecoder names no codec.
+	decoder_missing     func(d *cDecoder, media int32) string
 	decoder_open_device func(d *cDecoder, format *byte, url *byte, options *byte) int32
 	// nil against a libgoffmpeg older than #5; openDeviceDecoder falls back to
 	// decoder_open_device and simply has no AVERROR to report.
@@ -155,6 +161,14 @@ func init() {
 	// still binds what it has.
 	if hasSymbol(lib, "decoder_open_opts") {
 		purego.RegisterLibFunc(&decoder_open_opts, lib, "decoder_open_opts")
+	}
+	// Missing decoders (#41): newer than decoder_open_opts, and probed apart
+	// from it for the same reason.
+	if hasSymbol(lib, "decoder_open_opts_err") {
+		purego.RegisterLibFunc(&decoder_open_opts_err, lib, "decoder_open_opts_err")
+	}
+	if hasSymbol(lib, "decoder_missing") {
+		purego.RegisterLibFunc(&decoder_missing, lib, "decoder_missing")
 	}
 
 	// Same probe for the device-open AVERROR out-param. Its absence is not
@@ -303,6 +317,8 @@ type puregoDecoder struct {
 	// audio holds the caller's channel and rate requests, so rebuilding the
 	// resampler for one keeps the other.
 	audio audioRequest
+	// missing is decoder_missing's answer at open, video then audio.
+	missing [2]string
 
 	// mu orders Interrupt against Close, which frees the flag Interrupt sets.
 	mu     sync.Mutex
@@ -326,22 +342,34 @@ func openDecoder(url, options string) (IDecoder, error) {
 	cUrl := []byte(url + "\x00")
 
 	var res int
-	if decoder_open_opts != nil {
-		cOpts := []byte(options + "\x00")
+	var averr int32
+	cOpts := []byte(options + "\x00")
+	switch {
+	case decoder_open_opts_err != nil:
+		res = int(decoder_open_opts_err(&d.d, &cUrl[0], &cOpts[0], &averr))
+	case decoder_open_opts != nil:
 		res = int(decoder_open_opts(&d.d, &cUrl[0], &cOpts[0]))
-	} else {
+	default:
 		res = int(decoder_open(&d.d, &cUrl[0]))
 	}
+	d.missing = puregoMissing(&d.d)
 	if res != 0 {
 		// A failed open can leave the interrupt flag, and a format context
 		// whose streams could not be read, behind.
 		decoder_close(&d.d)
-		if res == -8 {
-			return nil, fmt.Errorf("goffmpeg: malformed open options %q", options)
-		}
-		return nil, fmt.Errorf("open failed: %d", res)
+		return nil, openError(fmt.Sprintf("%q", url), res, int(averr), options, d.missing)
 	}
 	return d, nil
+}
+
+// puregoMissing reads decoder_missing for video and audio, before
+// decoder_close frees what the names come from. Empty against a libgoffmpeg
+// that doesn't export it.
+func puregoMissing(d *cDecoder) [2]string {
+	if decoder_missing == nil {
+		return [2]string{}
+	}
+	return [2]string{decoder_missing(d, 1), decoder_missing(d, 2)}
 }
 
 // openReaderDecoder is unsupported on the purego backend: feeding libavformat
@@ -367,19 +395,23 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 	} else {
 		res = int(decoder_open_device(&d.d, &cFormat[0], &cURL[0], &cOpts[0]))
 	}
+	d.missing = puregoMissing(&d.d)
 	if res != 0 {
 		decoder_close(&d.d)
+		if res == -9 {
+			return nil, openError(fmt.Sprintf("device %q %q", format, url), res, 0, options, d.missing)
+		}
 		return nil, openDeviceError(format, url, res, int(averr))
 	}
 	return d, nil
 }
 
 func (d *puregoDecoder) VideoInfo() VideoInfo {
-	return VideoInfo{Width: int(d.d.width), Height: int(d.d.height), Framerate: d.d.framerate}
+	return VideoInfo{Width: int(d.d.width), Height: int(d.d.height), Framerate: d.d.framerate, MissingDecoder: d.missing[0]}
 }
 
 func (d *puregoDecoder) AudioInfo() AudioInfo {
-	return AudioInfo{SampleRate: int(d.d.sample_rate), Channels: int(d.d.channels)}
+	return AudioInfo{SampleRate: int(d.d.sample_rate), Channels: int(d.d.channels), MissingDecoder: d.missing[1]}
 }
 
 func (d *puregoDecoder) Position() float64 {
@@ -464,4 +496,11 @@ func (d *puregoDecoder) Seek(seconds float64) error {
 
 func (d *puregoDecoder) bridgeSeek(seconds float64) int {
 	return int(decoder_seek(&d.d, seconds))
+}
+
+// missingDecoderSupported reports whether the loaded libgoffmpeg exports what
+// #41's reporting needs: decoder_missing, and decoder_open_opts_err for the
+// AVERROR. One built before them opens as before and names nothing.
+func missingDecoderSupported() bool {
+	return decoder_missing != nil && decoder_open_opts_err != nil
 }

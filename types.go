@@ -21,11 +21,22 @@ type VideoInfo struct {
 	Width     int
 	Height    int
 	Framerate float64
+	// MissingDecoder is the codec of the input's video stream ("hevc") when
+	// this build has no decoder for it, and empty when the video decodes or
+	// there is none. The input opens with the streams it can decode (#41), so
+	// an MP4 whose video a build can't decode still plays its audio; this says
+	// why no video arrives. An audio-only build (goffmpeg_novideo) names every
+	// video stream here. It reads empty under CGO_ENABLED=0 with a libgoffmpeg
+	// older than decoder_missing.
+	MissingDecoder string
 }
 
 type AudioInfo struct {
 	SampleRate int
 	Channels   int
+	// MissingDecoder is the codec of the input's audio stream when this build
+	// has no decoder for it, and empty otherwise, as VideoInfo's.
+	MissingDecoder string
 }
 
 type IDecoder interface {
@@ -276,6 +287,47 @@ var ErrAgain = errors.New("goffmpeg: no data available yet")
 // tag, which decodes audio only: no video frame ever arrives there.
 var ErrVideoNotBuilt = errors.New("goffmpeg: built without video (the goffmpeg_novideo tag)")
 
+// ErrNoDecoder reports an input this build can decode none of: it has a video
+// or audio stream, or both, and no decoder for any of them (#41). The error
+// names the codecs. An input with one stream this build decodes opens anyway,
+// and VideoInfo or AudioInfo names the other in MissingDecoder.
+var ErrNoDecoder = errors.New("goffmpeg: this build has no decoder for any stream of the input")
+
+// ErrUnrecognizedInput reports an input no demuxer in this build recognizes:
+// a container format the build leaves out, or data that isn't media at all
+// (#41). FFmpeg reports both as AVERROR_INVALIDDATA, which the error wraps.
+var ErrUnrecognizedInput = errors.New("goffmpeg: no demuxer in this build recognizes the input, or it is not media")
+
+// openError turns a failed open into an error. rc is the bridge's code and
+// averr the AVERROR it reported for a -1 (0 when there is none, or the loaded
+// libgoffmpeg is too old to report one). what names the input. missing names
+// the codecs decoder_missing found for GOFFMPEG_NO_DECODER, video then audio,
+// either one empty.
+func openError(what string, rc, averr int, options string, missing [2]string) error {
+	switch {
+	case rc == -8:
+		return fmt.Errorf("goffmpeg: malformed open options %q", options)
+	case rc == -9:
+		var names []string
+		if missing[0] != "" {
+			names = append(names, "video "+missing[0])
+		}
+		if missing[1] != "" {
+			names = append(names, "audio "+missing[1])
+		}
+		if len(names) == 0 {
+			return fmt.Errorf("%w (%s)", ErrNoDecoder, what)
+		}
+		return fmt.Errorf("%w (%s): %s", ErrNoDecoder, what, strings.Join(names, ", "))
+	case rc == -1 && AVError(averr) == avErrorInvalidData:
+		return fmt.Errorf("%w (%s): %w", ErrUnrecognizedInput, what, AVError(averr))
+	case rc == -1 && averr != 0:
+		return fmt.Errorf("goffmpeg: opening %s: %w", what, AVError(averr))
+	default:
+		return fmt.Errorf("goffmpeg: opening %s failed: %d", what, rc)
+	}
+}
+
 // AVError is an FFmpeg AVERROR code reported by the decoder.
 //
 // It exists so a caller can classify a failure without parsing a formatted
@@ -300,6 +352,12 @@ func (e AVError) Error() string {
 	if e == avErrorEOF {
 		return fmt.Sprintf("goffmpeg: decoder error: %d (end of file)", int(e))
 	}
+	if e == avErrorInvalidData {
+		return fmt.Sprintf("goffmpeg: decoder error: %d (invalid data)", int(e))
+	}
+	if e == avErrorProtocolNotFound {
+		return fmt.Sprintf("goffmpeg: decoder error: %d (protocol not found)", int(e))
+	}
 	return fmt.Sprintf("goffmpeg: decoder error: %d", int(e))
 }
 
@@ -307,6 +365,15 @@ func (e AVError) Error() string {
 // decoder_next maps it to a clean 0 before it reaches Go, so this is only for
 // naming the value if it ever arrives by another route.
 const avErrorEOF AVError = -('E' | 'O'<<8 | 'F'<<16 | ' '<<24)
+
+// avErrorInvalidData mirrors AVERROR_INVALIDDATA, FFERRTAG('I','N','D','A'):
+// what avformat_open_input returns when no demuxer recognizes the input.
+const avErrorInvalidData AVError = -('I' | 'N'<<8 | 'D'<<16 | 'A'<<24)
+
+// avErrorProtocolNotFound mirrors AVERROR_PROTOCOL_NOT_FOUND,
+// FFERRTAG(0xF8,'P','R','O'): a URL whose scheme the build has no protocol
+// for, as https on Android, which is built without TLS.
+const avErrorProtocolNotFound AVError = -(0xF8 | 'P'<<8 | 'R'<<16 | 'O'<<24)
 
 // avErrorExit mirrors AVERROR_EXIT, FFERRTAG('E','X','I','T'): what FFmpeg
 // returns from an operation its interrupt callback stopped. Seek and Next

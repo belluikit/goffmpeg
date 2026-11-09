@@ -5,6 +5,7 @@ package goffmpeg
 import (
 	"errors"
 	"image"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,40 @@ func TestNoVideoDecodesAudioOnly(t *testing.T) {
 	}
 	if err := dec.GetRGBA(image.NewRGBA(image.Rect(0, 0, 2, 2))); !errors.Is(err, ErrVideoNotBuilt) {
 		t.Errorf("GetRGBA: %v, want ErrVideoNotBuilt", err)
+	}
+}
+
+// The stream an audio-only build skips is named, so an app can tell "this
+// file has video this build doesn't decode" from "this file has no video"
+// (#41). The audio, which it does decode, names nothing.
+func TestNoVideoNamesTheVideoItSkips(t *testing.T) {
+	dec, err := Open("testdata/sample.mp4") // H.264 video and AAC audio
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	if got := dec.VideoInfo().MissingDecoder; got != "h264" {
+		t.Errorf("VideoInfo().MissingDecoder = %q, want h264", got)
+	}
+	if got := dec.AudioInfo().MissingDecoder; got != "" {
+		t.Errorf("AudioInfo().MissingDecoder = %q, want empty: the audio decodes", got)
+	}
+}
+
+// An input with nothing an audio-only build decodes, a video with no audio,
+// fails to open with ErrNoDecoder naming the codec, instead of opening and
+// yielding nothing (#41).
+func TestNoVideoVideoOnlyInputFails(t *testing.T) {
+	dec, err := Open("testdata/sample_video_cover.mp4") // video and cover art, no audio
+	if err == nil {
+		dec.Close()
+		t.Fatal("a video-only file opened in an audio-only build")
+	}
+	if !errors.Is(err, ErrNoDecoder) {
+		t.Fatalf("%v, want ErrNoDecoder", err)
+	}
+	if !strings.Contains(err.Error(), "video ") {
+		t.Errorf("%q doesn't name the video codec", err)
 	}
 }
 
