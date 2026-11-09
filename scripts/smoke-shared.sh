@@ -4,6 +4,7 @@
 # Links testdata/sharedsmoke/smoke.c against the shared FFmpeg libraries in DIR
 # and nothing else, then runs it on SAMPLE when this machine can execute
 # TARGET. SMOKE_CC is the target's C compiler and INCLUDE the FFmpeg headers.
+# SMOKE_SET picks the codec set's checks (media or audio, below).
 # SMOKE_RUN is 1 (must run), 0 (link only) or auto (run on a matching host).
 #
 # It ends with one line saying which it did, "ran" or "linked", so a log can
@@ -17,9 +18,12 @@ run=${SMOKE_RUN:-auto}
 
 mkdir -p "$work"
 exe="$work/smoke"
+# SMOKE_SET is the codec set (#41): media decodes video and links avdevice on
+# desktop; audio decodes audio, and has neither libswscale nor libavdevice.
 defs=
-case $target in
-darwin_*|linux_*|windows_*) defs=-DSMOKE_AVDEVICE ;;
+case ${SMOKE_SET:-media}:$target in
+media:darwin_*|media:linux_*|media:windows_*) defs=-DSMOKE_AVDEVICE ;;
+audio:*) defs=-DSMOKE_AUDIO ;;
 esac
 
 # Each library by its path, so the link can only use the shared build.

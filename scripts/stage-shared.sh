@@ -39,6 +39,12 @@ ios_*|iossimulator_*)
 		version=${file#"$name".}
 		version=${version%.dylib}           # 62.21.100
 		fw="$out/$name.framework"
+		# The bundle id names the library without the set's suffix
+		# (-goffmpeg, or -goffmpeg-audio for the audio set, #41), and the
+		# audio set apart: com.trendvidia.goffmpeg.audio.libavcodec.
+		bundle_lib=${name%"${SHARED_SUFFIX:--goffmpeg}"}
+		bundle_set=
+		[ "${SHARED_SUFFIX:--goffmpeg}" = -goffmpeg ] || bundle_set=.${SHARED_SUFFIX#-goffmpeg-}
 		mkdir -p "$fw"
 		cp "$f" "$fw/$name"
 		install_name_tool -id "@rpath/$name.framework/$name" "$fw/$name"
@@ -56,7 +62,7 @@ ios_*|iossimulator_*)
 <dict>
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
 	<key>CFBundleExecutable</key><string>$name</string>
-	<key>CFBundleIdentifier</key><string>com.trendvidia.goffmpeg.${name%-*}</string>
+	<key>CFBundleIdentifier</key><string>com.trendvidia.goffmpeg$bundle_set.$bundle_lib</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>$name</string>
 	<key>CFBundlePackageType</key><string>FMWK</string>

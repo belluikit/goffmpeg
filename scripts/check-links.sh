@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# check-links.sh TARGET BINARY SHARED_DIR [novideo]
+# check-links.sh TARGET BINARY SHARED_DIR [SET]
 #
 # Checks how a goffmpeg binary for TARGET links FFmpeg: it must import every
-# shared FFmpeg library in SHARED_DIR by the name the loader looks for, and
-# define none of FFmpeg's code itself. With "novideo" (a goffmpeg_novideo
-# build) it must not import libswscale, because a package for that build
-# leaves libswscale out and a binary that still named it would not load.
+# shared FFmpeg library of codec set SET (media, the default, or audio for a
+# goffmpeg_novideo build; #41) in SHARED_DIR by the name the loader looks for,
+# none of the other set's, and define none of FFmpeg's code itself. A package
+# carries one set, so a binary that named a library of the other would not
+# load; the audio set has no libswscale or libavdevice to name.
 #
 # CI runs this on the test binaries it cross-links, for the targets whose tests
 # it cannot run (iOS, Android). Where the tests run, TestLinksSharedFFmpeg and
@@ -16,7 +17,7 @@
 # defined-symbol check, skipped on Windows.
 set -euo pipefail
 
-target=$1 bin=$2 shared=$3 mode=${4:-}
+target=$1 bin=$2 shared=$3 set=${4:-media}
 here=$(cd "$(dirname "$0")" && pwd)
 READELF=${READELF:-readelf} OBJDUMP=${OBJDUMP:-objdump} NM=${NM:-nm}
 
@@ -30,24 +31,30 @@ esac
 [ -n "$imports" ] || { echo "check-links: $bin imports nothing: the read found nothing" >&2; exit 1; }
 
 # Read first, so a listing that fails stops the check here.
-libs=$("$here/shared-libs.sh" "$target" "$shared")
+libs=$("$here/shared-libs.sh" "$target" "$shared" "$set")
 
 # here-strings rather than pipes into grep -q: with pipefail, grep exiting at
 # its first match can fail the writer with SIGPIPE, which reads as no match.
 fail=0
 while read -r name _ load; do
-    if [ "$name" = swscale ] && [ "$mode" = novideo ]; then
-        if grep -qxF "$load" <<< "$imports"; then
-            echo "FAIL $target: an audio-only binary imports $load"; fail=1
-        else
-            echo "ok   $target: does not import $load (audio only)"
-        fi
-    elif grep -qxF "$load" <<< "$imports"; then
+    if grep -qxF "$load" <<< "$imports"; then
         echo "ok   $target: imports $load"
     else
         echo "FAIL $target: does not import $load"; fail=1
     fi
 done <<< "$libs"
+
+# None of the other set's libraries: the audio set's names carry
+# -goffmpeg-audio, the media set's -goffmpeg alone.
+case $set in
+    audio) other=$(grep -E -- '-goffmpeg' <<< "$imports" | grep -vF -- '-goffmpeg-audio' || true) ;;
+    *)     other=$(grep -F -- '-goffmpeg-audio' <<< "$imports" || true) ;;
+esac
+if [ -n "$other" ]; then
+    echo "FAIL $target: a $set-set binary imports the other set's $(echo $other)"; fail=1
+else
+    echo "ok   $target: imports nothing of the other set"
+fi
 
 case "$target" in
     windows_*) ;;
