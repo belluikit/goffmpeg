@@ -176,14 +176,11 @@ jobs:
           echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
           echo "::notice::using NDK $NDK"
 
+      # The shared libraries apps ship (Player ADR-0037 D3, goffmpeg-libs#14),
+      # the only FFmpeg build since #45. dist ends with check-shared, which
+      # fails on a name or dependency the loader would not resolve.
       - name: Build ${{ matrix.target }}
         run: make dist TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
-
-      # The shared libraries apps ship (Player ADR-0037 D3, goffmpeg-libs#14),
-      # from a configure of their own. dist-shared ends with check-shared, which
-      # fails on a name or dependency the loader would not resolve.
-      - name: Shared libraries ${{ matrix.target }}
-        run: make dist-shared TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
 
       # Decodes a file through the shared libraries alone, where this machine
       # can run the target: macOS natively, the simulator slice in a booted
@@ -209,10 +206,10 @@ jobs:
         run: make bridge-shared TARGET=${{ matrix.target }}
 
       # actions/checkout cannot place a second repository outside the workspace,
-      # and sync-libs alone copies only lib/ — leaving no go.mod for the
-      # replace to point at. Cloning the companion repo gives a real module;
-      # sync-libs then overwrites its lib/ with the freshly built artifacts, so
-      # the link check still validates this build rather than the published one.
+      # and sync-libs alone copies only the libraries — leaving no go.mod for
+      # the replace to point at. Cloning the companion repo gives a real module;
+      # sync-libs then replaces its libraries and link files with this build's,
+      # so the link check validates this build rather than the published one.
       - name: Clone companion modules
         run: |
           rm -rf "$RUNNER_TEMP/libs"
@@ -345,13 +342,10 @@ jobs:
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
 
-      - name: Build ${{ matrix.target }}
-        run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
-
       # The shared libraries, as in the apple-android job. On Windows,
       # check-shared also refuses a DLL that imports one Windows does not ship.
-      - name: Shared libraries ${{ matrix.target }}
-        run: make dist-shared TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
+      - name: Build ${{ matrix.target }}
+        run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
 
       # Runs on linux_amd64, this runner's own platform. The Windows DLLs only
       # link here; windows-test runs them on Windows.
@@ -393,10 +387,10 @@ jobs:
           fi
 
       # actions/checkout cannot place a second repository outside the workspace,
-      # and sync-libs alone copies only lib/ — leaving no go.mod for the
-      # replace to point at. Cloning the companion repo gives a real module;
-      # sync-libs then overwrites its lib/ with the freshly built artifacts, so
-      # the link check still validates this build rather than the published one.
+      # and sync-libs alone copies only the libraries — leaving no go.mod for
+      # the replace to point at. Cloning the companion repo gives a real module;
+      # sync-libs then replaces its libraries and link files with this build's,
+      # so the link check validates this build rather than the published one.
       - name: Clone companion modules
         run: |
           rm -rf "$RUNNER_TEMP/libs"
@@ -641,9 +635,6 @@ jobs:
 
       - name: Build linux_arm64
         run: make dist TARGET=linux_arm64 NPROC="$(nproc)"
-
-      - name: Shared libraries
-        run: make dist-shared TARGET=linux_arm64 NPROC="$(nproc)"
 
       - name: Smoke-test the shared libraries
         run: make smoke-shared TARGET=linux_arm64 SMOKE_RUN=1

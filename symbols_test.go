@@ -12,8 +12,9 @@ import (
 )
 
 // linkedSymbols is the test binary's own symbol table, the names without
-// macOS's leading underscore: what the static link pulled in. It skips where
-// the format isn't read here.
+// macOS's leading underscore: every symbol the binary defines or imports. It
+// skips where the format isn't read here, and on Linux, whose test binaries
+// have no symbol table.
 func linkedSymbols(t *testing.T) map[string]bool {
 	t.Helper()
 	exe, err := os.Executable()
