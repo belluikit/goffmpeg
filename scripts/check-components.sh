@@ -2,8 +2,9 @@
 # check-components.sh BUILD_DIR
 #
 # Holds a configured FFmpeg build to its codec set (#41): the decoders,
-# demuxers, parsers and hwaccels config_components.h enables must be exactly
-# DECODERS, DEMUXERS, PARSERS and HWACCELS (space-separated FFmpeg names).
+# demuxers, parsers, hwaccels and input devices config_components.h enables
+# must be exactly DECODERS, DEMUXERS, PARSERS, HWACCELS and INDEVS
+# (space-separated FFmpeg names).
 # configure turns on whatever an enabled component selects, so a flag that
 # asks for one decoder can bring others with it: videotoolbox's hwaccels
 # brought hevc, av1 and vp9 back. This is the test that fails when a set's
@@ -27,12 +28,13 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 fail=0
-for kind in DECODER DEMUXER PARSER HWACCEL; do
+for kind in DECODER DEMUXER PARSER HWACCEL INDEV; do
 	case $kind in
 	DECODER) want=${DECODERS:-} ;;
 	DEMUXER) want=${DEMUXERS:-} ;;
 	PARSER)  want=${PARSERS:-} ;;
 	HWACCEL) want=${HWACCELS:-} ;;
+	INDEV)   want=${INDEVS:-} ;;
 	esac
 	got=$(enabled $kind)
 	want=$(printf '%s\n' $want | sed '/^$/d' | sort)

@@ -50,7 +50,7 @@ MACOS_MIN  := 11.0
 IOS_MIN    := 13.0
 APPLE_CONF = --enable-securetransport --enable-videotoolbox
 
-MACOS_CONF = $(APPLE_CONF) --enable-avdevice --enable-indev=avfoundation --enable-avfoundation
+MACOS_CONF = $(APPLE_CONF) --enable-avdevice --enable-avfoundation
 
 ifeq ($(TARGET),darwin_arm64)
 	TARGET_CONF = --arch=arm64 --target-os=darwin $(MACOS_CONF) \
@@ -127,12 +127,12 @@ endif
 # host produces.
 GLIBC_FLOOR := 2.35
 ifeq ($(TARGET),linux_amd64)
-	TARGET_CONF = --arch=x86_64 --target-os=linux --enable-openssl --enable-avdevice --enable-indev=v4l2
+	TARGET_CONF = --arch=x86_64 --target-os=linux --enable-openssl --enable-avdevice
 	LIB_EXT = so
 endif
 
 ifeq ($(TARGET),linux_arm64)
-	TARGET_CONF = --arch=aarch64 --target-os=linux --enable-openssl --enable-avdevice --enable-indev=v4l2
+	TARGET_CONF = --arch=aarch64 --target-os=linux --enable-openssl --enable-avdevice
 	LIB_EXT = so
 endif
 
@@ -140,7 +140,7 @@ endif
 ifeq ($(TARGET),windows_amd64)
 	TARGET_CONF = --arch=x86_64 --target-os=mingw32 --enable-cross-compile \
 		--cross-prefix=x86_64-w64-mingw32- --enable-schannel \
-		--enable-avdevice --enable-indev=dshow
+		--enable-avdevice
 	LIB_EXT = dll
 endif
 
@@ -151,7 +151,7 @@ LLVM_MINGW ?= /opt/llvm-mingw
 ifeq ($(TARGET),windows_arm64)
 	TARGET_CONF = --arch=aarch64 --target-os=mingw32 --enable-cross-compile \
 		--cross-prefix=$(LLVM_MINGW)/bin/aarch64-w64-mingw32- --enable-schannel \
-		--enable-avdevice --enable-indev=dshow
+		--enable-avdevice
 	LIB_EXT = dll
 endif
 
@@ -187,6 +187,7 @@ SET_DEMUXERS = mp3 wav
 SET_DECODERS = mp3float pcm_s16le pcm_s24le pcm_s32le pcm_f32le pcm_f64le pcm_u8
 SET_PARSERS  = mpegaudio
 SET_HWACCELS =
+SET_INDEVS   =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
 	SET_DECODERS += h264 aac
@@ -199,26 +200,34 @@ else ifeq ($(SET),audio)
 else
 $(error unknown SET "$(SET)": media or audio)
 endif
-# Webcam frames are raw, or MJPEG on v4l2 and dshow (#41).
+# Webcam capture, desktop and media set only: the one input device that
+# reads cameras on each OS, and the decoders for what cameras deliver, raw
+# frames or MJPEG (v4l2, dshow). The other input devices are off: they aren't
+# used, and gdigrab, Windows' screen capture, selects the bmp decoder.
 ifeq ($(SET)$(filter darwin_% linux_% windows_%,$(TARGET)),media$(TARGET))
 	SET_DECODERS += rawvideo mjpeg
+	SET_INDEVS   += $(if $(filter darwin_%,$(TARGET)),avfoundation,$(if $(filter linux_%,$(TARGET)),v4l2,dshow))
 endif
 # VideoToolbox decodes through FFmpeg's own h264 decoder, which it selects.
 ifeq ($(SET)$(filter darwin_% ios_% iossimulator_%,$(TARGET)),media$(TARGET))
 	SET_HWACCELS += h264_videotoolbox
 endif
 
-# Decoders, demuxers, parsers, bitstream filters and hwaccels all start empty.
+# Decoders, demuxers, parsers, bitstream filters, hwaccels and input devices all
+# start empty.
 # Left enabled, filters and hwaccels select decoders and parsers back in:
 # videotoolbox's hevc, av1 and vp9 hwaccels brought their decoders, and the
 # eac3_core and dts2pts filters the ac3 and hevc parsers. A component a set
 # keeps still selects what it needs.
-SET_CONF = --disable-decoders --disable-demuxers --disable-parsers --disable-bsfs --disable-hwaccels \
+SET_CONF = --disable-decoders --disable-demuxers --disable-parsers --disable-bsfs --disable-hwaccels --disable-indevs \
 	--enable-demuxer=$(subst $(space),$(comma),$(strip $(SET_DEMUXERS))) \
 	--enable-decoder=$(subst $(space),$(comma),$(strip $(SET_DECODERS))) \
 	--enable-parser=$(subst $(space),$(comma),$(strip $(SET_PARSERS)))
 ifneq ($(strip $(SET_HWACCELS)),)
 	SET_CONF += --enable-hwaccel=$(subst $(space),$(comma),$(strip $(SET_HWACCELS)))
+endif
+ifneq ($(strip $(SET_INDEVS)),)
+	SET_CONF += --enable-indev=$(subst $(space),$(comma),$(strip $(SET_INDEVS)))
 endif
 ifeq ($(SET),audio)
 	SET_CONF += --disable-swscale --disable-avdevice --disable-videotoolbox
@@ -267,7 +276,7 @@ endif
 
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
         bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths \
-        check-shared smoke-shared
+        check-shared check-components smoke-shared
 
 # `all` builds the host target only. Use dist-all for the full matrix.
 all: dist
@@ -324,8 +333,7 @@ print-config: check-src
 dist: check-src patch-src
 	@mkdir -p "$(SHARED_BUILD_DIR)"
 	cd "$(SHARED_BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
-	DECODERS="$(SET_DECODERS)" DEMUXERS="$(SET_DEMUXERS)" PARSERS="$(SET_PARSERS)" HWACCELS="$(SET_HWACCELS)" \
-		scripts/check-components.sh "$(SHARED_BUILD_DIR)"
+	@$(MAKE) --no-print-directory check-components TARGET=$(TARGET) SET=$(SET)
 	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC)
 	rm -rf "$(SHARED_STAGE)"
 	$(MAKE) -C "$(SHARED_BUILD_DIR)" install DESTDIR="$(SHARED_STAGE)"
@@ -333,6 +341,15 @@ dist: check-src patch-src
 		scripts/stage-shared.sh "$(TARGET)" "$(SHARED_STAGE)/$(TARGET)" "$(SHARED_DIR)"
 	@$(MAKE) --no-print-directory check-shared TARGET=$(TARGET) SET=$(SET)
 	@echo "==> $(TARGET) $(SET) set's shared libraries installed to $(SHARED_DIR)"
+
+# check-components holds the configured build to its codec set's lists (#41):
+# configure enables what an enabled component selects, and this fails a build
+# that carries a decoder, demuxer, parser, hwaccel or input device the set
+# doesn't list. dist runs it after configure, before compiling anything.
+check-components:
+	DECODERS="$(SET_DECODERS)" DEMUXERS="$(SET_DEMUXERS)" PARSERS="$(SET_PARSERS)" \
+		HWACCELS="$(SET_HWACCELS)" INDEVS="$(SET_INDEVS)" \
+		scripts/check-components.sh "$(SHARED_BUILD_DIR)"
 
 # check-shared refuses a shared build whose names or links would not load: a
 # soname or install name that is not the file's own name, a dependency on a

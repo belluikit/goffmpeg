@@ -294,7 +294,10 @@ off in both: this library only ever decodes.
 
 The audio set has no libswscale and no libavdevice. goffmpeg links it under the
 `goffmpeg_novideo` tag. On Apple, the media set enables VideoToolbox's H.264
-hwaccel and no other. Each set has the parsers its formats need (`mpegaudio`,
+hwaccel and no other. On desktop, the media set has the one input device that
+reads cameras on each OS (`avfoundation`, `v4l2`, `dshow`) and no other: the
+rest aren't used, and `gdigrab`, Windows' screen capture, selects a BMP
+decoder. Each set has the parsers its formats need (`mpegaudio`,
 and `h264` and `aac` in the media set), and no bitstream filter that isn't
 selected by something it keeps. Every protocol stays, so `http`, and `https`
 where the target has TLS, still open.
@@ -307,9 +310,10 @@ published until v0.5.0. libavcodec alone is 2.0 MB and 0.4 MB, against 11.2 MB.
 an enabled component selects, so a flag that asks for one decoder can bring
 others: VideoToolbox's HEVC, AV1 and VP9 hwaccels brought their decoders back,
 and the `eac3_core` and `dts2pts` filters the AC-3 and HEVC parsers. So every
-build starts with decoders, demuxers, parsers, bitstream filters and hwaccels
-off, and `make dist` runs `scripts/check-components.sh`, which fails the build
-when `config_components.h` enables anything but the set's lists. At run time,
+build starts with decoders, demuxers, parsers, bitstream filters, hwaccels and
+input devices off, and `make dist` runs `make check-components`
+(`scripts/check-components.sh`), which fails the build when
+`config_components.h` enables anything but the set's lists. At run time,
 `TestBuiltCodecsAreTheSet` lists the decoders and demuxers the loaded FFmpeg
 holds and compares them with the same lists.
 
