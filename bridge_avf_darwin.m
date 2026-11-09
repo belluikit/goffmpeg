@@ -20,6 +20,10 @@
 
 #include "bridge.h"
 
+// An audio-only build (goffmpeg_novideo, GOFFMPEG_NO_AVDEVICE) has no capture,
+// so there are no modes to report and no device_modes_append to report them to.
+#ifndef GOFFMPEG_NO_AVDEVICE
+
 // avf_pixel_format_name maps a CoreVideo pixel format to the name libav uses.
 //
 // This mirrors avf_pixel_formats in FFmpeg's avfoundation.m entry for entry,
@@ -141,3 +145,5 @@ int goffmpeg_avf_collect_modes(const char *url, void *modes) {
         return 0;
     }
 }
+
+#endif // GOFFMPEG_NO_AVDEVICE

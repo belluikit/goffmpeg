@@ -2,14 +2,15 @@
 
 package goffmpeg
 
-// The goffmpeg_novideo tag builds goffmpeg for audio only: the bridge opens no
-// video stream and never calls libswscale, and goffmpeg-libs' link files leave
-// libswscale out under the same tag (#40), so the binary doesn't load it and
-// an app ships without it (about 1.2 MB on android/arm64). Video frames never
-// arrive, and GetRGBA returns ErrVideoNotBuilt. It changes the cgo build only:
-// a purego build loads a prebuilt libgoffmpeg, which has video.
+// The goffmpeg_novideo tag builds goffmpeg for audio only, against the audio
+// codec set (#41): MP3 and WAV, in goffmpeg-libs' shared-audio/, with no
+// libswscale and no libavdevice. The bridge opens no video stream, never calls
+// libswscale and has no capture: OpenDevice and ListInputSources report that
+// the build has no libavdevice. Video frames never arrive, and GetRGBA returns
+// ErrVideoNotBuilt. It changes the cgo build only: a purego build loads a
+// prebuilt libgoffmpeg, which links the media set.
 
 /*
-#cgo CFLAGS: -DGOFFMPEG_NO_VIDEO
+#cgo CFLAGS: -DGOFFMPEG_NO_VIDEO -DGOFFMPEG_NO_AVDEVICE
 */
 import "C"

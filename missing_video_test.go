@@ -4,9 +4,13 @@ package goffmpeg
 
 import "testing"
 
+// testCodecSet is the codec set this test build links (#41): a build without
+// goffmpeg_novideo links the media set. novideo_test.go says "audio".
+const testCodecSet = "media"
+
 // A build that decodes every stream of a file reports no MissingDecoder: the
 // field is empty for a stream that decodes, not only for one that is absent.
-// The audio-only build's twin is TestNoVideoNamesTheVideoItSkips.
+// TestMediaSetNamesHEVCAndPlaysAudio is the case where a stream doesn't decode.
 func TestMissingDecoderEmptyWhenDecoded(t *testing.T) {
 	requireMissingDecoderSupport(t)
 	dec, err := Open("testdata/sample.mp4") // H.264 video and AAC audio
