@@ -282,7 +282,10 @@ jobs:
         if: matrix.target == 'windows_arm64'
         run: |
           ASSET="llvm-mingw-$LLVM_MINGW_TAG-ucrt-ubuntu-22.04-x86_64.tar.xz"
-          curl -fsSL -o "$RUNNER_TEMP/$ASSET" \
+          # GitHub's release download answers 504 now and then (twice in a row
+          # on run 42567042426), and one miss fails the leg. The digest check
+          # below still catches a bad asset.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 -o "$RUNNER_TEMP/$ASSET" \
             "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_TAG/$ASSET"
           echo "$LLVM_MINGW_LINUX_SHA256  $RUNNER_TEMP/$ASSET" | sha256sum -c -
           sudo mkdir -p /opt/llvm-mingw
@@ -461,7 +464,8 @@ jobs:
         run: |
           $asset = "llvm-mingw-$env:LLVM_MINGW_TAG-ucrt-aarch64"
           $zip = Join-Path $env:RUNNER_TEMP "$asset.zip"
-          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$asset.zip" -OutFile $zip
+          # Retries for the same intermittent 504 as the Linux download.
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$asset.zip" -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
           $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
           if ($hash -ne $env:LLVM_MINGW_WINARM_SHA256) { throw "llvm-mingw digest mismatch: $hash" }
           Expand-Archive -Path $zip -DestinationPath C:\
