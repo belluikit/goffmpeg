@@ -381,8 +381,8 @@ to be position-independent.
 
 ## Network sources
 
-The Android libraries have no TLS, so `https` URLs fail to open there with
-`failed to open decoder: -1`. Plain `http` works, and `OpenReader` can take
+The Android libraries have no TLS, so `https` URLs fail to open there with an
+`AVError` of `AVERROR_PROTOCOL_NOT_FOUND` ("protocol not found"). Plain `http` works, and `OpenReader` can take
 `https` read through Go, but not HLS, because FFmpeg has to fetch the segments
 itself.
 
