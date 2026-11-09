@@ -11,3 +11,11 @@ func TestVideoLinksSwscale(t *testing.T) {
 		t.Error("sws_scale isn't linked in a build with video")
 	}
 }
+
+// The twin of TestNoVideoImportsNoSwscale: a build with video imports
+// libswscale, so the audio-only check reads a list that would show it.
+func TestVideoImportsSwscale(t *testing.T) {
+	if got := requireSharedFFmpeg(t); !got["swscale"] {
+		t.Error("a build with video doesn't import libswscale-goffmpeg")
+	}
+}

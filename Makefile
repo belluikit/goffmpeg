@@ -415,20 +415,22 @@ WIN_SYSLIBS = -lsecur32 -lbcrypt -lws2_32 -lole32 -loleaut32 -lstrmiids -luuid \
 	-lgdi32 -lavicap32 -lvfw32 -luser32 -lshlwapi -lcrypt32 -lncrypt -lmfplat -lmfuuid
 
 # Companion modules under github.com/belluikit/goffmpeg-libs distribute the
-# static libraries, one module per platform, so a consumer downloads only their
-# own target rather than every one. sync-libs copies a freshly built target
-# into a sibling checkout of that repository.
+# libraries, one module per platform, so a consumer downloads only their own
+# target rather than every one. sync-libs copies a freshly built target into a
+# sibling checkout of that repository, and writes the module's cgo link files
+# from the shared libraries it copied (scripts/gen-libav.sh): the versions in
+# their names come from the files, so an FFmpeg bump needs no hand edit.
 LIBS_REPO ?= $(ROOT)/../goffmpeg-libs
 
 sync-libs: check-paths
 	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
 	@mkdir -p "$(LIBS_REPO)/$(TARGET)/lib"
 	cp "$(DIST_DIR)"/lib/*.a "$(LIBS_REPO)/$(TARGET)/lib/"
 	@cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" 2>/dev/null && \
 		echo "    (including the purego shared bridge)" || true
-	@if [ -d "$(SHARED_DIR)" ]; then \
-		rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared" && \
-		echo "    (including the shared FFmpeg libraries)"; fi
+	rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared"
+	scripts/gen-libav.sh $(TARGET) "$(LIBS_REPO)/$(TARGET)"
 	@echo "==> $(TARGET) libraries synced to $(LIBS_REPO)/$(TARGET)"
 
 # check-paths refuses a build whose libraries name a personal home directory.
