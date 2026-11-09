@@ -67,6 +67,12 @@ jobs:
       - name: Test (cgo)
         run: go test -race -count=1 ./...
 
+      # The audio-only build (goffmpeg_novideo): audio decodes, video never
+      # arrives, and nothing of libswscale is linked. Only its own tests run
+      # under the tag; the rest expect video.
+      - name: Test (cgo, audio only)
+        run: go test -count=1 -tags goffmpeg_novideo -run 'NoVideo' .
+
       # purego dlopens libgoffmpeg rather than linking it, and a fresh checkout
       # has no dist/ (it is gitignored). Stage the shared library out of the
       # module cache, which also means this exercises the published artifact.

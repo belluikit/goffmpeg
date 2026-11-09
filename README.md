@@ -174,6 +174,16 @@ headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
   `ErrOpenOptionsUnavailable`, `ErrDeviceListUnavailable` or
   `ErrDeviceModesUnavailable` instead of crashing.
 
+## Audio only
+
+`-tags goffmpeg_novideo` builds the cgo backend for audio alone. The bridge opens
+no video stream and never calls libswscale, so a static link takes nothing of
+it: on android/arm64 a stripped binary is 1.2 MB smaller (goffmpeg-libs
+v0.3.5). A file with video still opens and plays its audio. No video frame
+arrives, `VideoInfo` reports no size, and `GetRGBA` returns `ErrVideoNotBuilt`.
+Camera capture needs video, so leave the tag off for it. The tag doesn't change
+the purego backend, which loads a prebuilt `libgoffmpeg` that has video.
+
 ## Building FFmpeg yourself
 
 You only need this to bump FFmpeg or change its configuration.
