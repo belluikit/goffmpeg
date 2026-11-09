@@ -35,9 +35,8 @@ Needed when bumping FFmpeg or changing its configuration:
 ```sh
 git clone https://github.com/FFmpeg/FFmpeg.git ../ffmpeg
 git -C ../ffmpeg checkout --detach e2bc6d88cd68184288c16570e04881c3a426a05a
-make dist TARGET=linux_amd64         # build the static libraries
-make dist-shared TARGET=linux_amd64  # build the shared ones, which are linked
-make sync-libs TARGET=linux_amd64    # copy into ../goffmpeg-libs, write its link files
+make dist TARGET=linux_amd64        # build the shared libraries
+make sync-libs TARGET=linux_amd64   # copy into ../goffmpeg-libs, write its link files
 ```
 
 `make dist` alone builds the host target; `make dist-all` builds everything this
@@ -63,20 +62,19 @@ cd ../goffmpeg-libs && git tag linux_amd64/v0.2.0 && git push origin --tags
 ## Shared libraries
 
 Apps built on Player ship FFmpeg as shared libraries, so a user can replace
-them (LGPL 2.1 §6b; Player ADR-0037 D3, goffmpeg-libs#14). `make dist-shared`
-builds them beside the static libraries, into `dist/<target>/shared`, and
-`sync-libs` copies that directory into the companion module as `shared/`:
+them (LGPL 2.1 §6b; Player ADR-0037 D3, goffmpeg-libs#14). They are the only
+FFmpeg goffmpeg builds: the static archives were last published in
+goffmpeg-libs v0.4.0 (#45). `make dist` builds them into `dist/<target>/shared`,
+and `sync-libs` copies that directory into the companion module as `shared/`:
 
 ```sh
-make dist TARGET=linux_amd64 && make dist-shared TARGET=linux_amd64
+make dist TARGET=linux_amd64
 make smoke-shared TARGET=linux_amd64  # decode a file through them
 make sync-libs TARGET=linux_amd64
 ```
 
-It is a configure of its own, the static line with `--enable-shared
---disable-static` and the flags below. FFmpeg will not build both kinds at once
-for Windows ("Cannot build both shared and static libs when using dllimport"),
-and one configure line per artifact is what each `NOTICE` records.
+The configure line is the base line with `--enable-shared --disable-static`
+and the flags below, and each `NOTICE` records it.
 
 Every name carries the suffix `-goffmpeg` (`--build-suffix`), so it cannot be
 mistaken for another FFmpeg in the same process or package: a distro
@@ -100,13 +98,11 @@ leaves symlinks out. Android's soname has no version because an APK installs
 only `lib*.so`.
 
 The libraries carry no rpath of their own: whatever loads them supplies it.
-`shared/` is a directory of its own, not `lib/`, so that a `-L` pointing at the
-static archives can never pick a shared library instead.
 
 ### Linking
 
-Both backends load these libraries; nothing links the static archives in
-`lib/` any more (#40). They are still built and published.
+Both backends load these libraries (#40). A goffmpeg-libs module's `lib/`
+holds only the purego bridge, on desktop.
 
 `make sync-libs` writes each goffmpeg-libs module's link files from the files
 in its `shared/` (`scripts/gen-libav.sh`), so the version numbers in the names
@@ -146,7 +142,7 @@ libswscale. `scripts/check-links.sh` checks a built binary the same way. CI runs
 it on every target it links, with and without `goffmpeg_novideo`, and
 `TestLinksSharedFFmpeg` checks it from inside wherever the tests run.
 
-`dist-shared` ends with `make check-shared`, which reads every library the way
+`make dist` ends with `make check-shared`, which reads every library the way
 its loader will. It checks that the library's own name is its file name, and
 that everything it links is beside it or part of the OS. On Android it also
 refuses text relocations and 4KB alignment, on Apple a signature that does not
@@ -264,8 +260,8 @@ darwin_arm64, linux_amd64, linux_arm64 and both Windows targets.
 
 A broad **decode-only** FFmpeg: every native decoder, demuxer, parser and
 protocol (484 decoders, 359 demuxers), with encoders, muxers and avfilter
-disabled because this library only ever decodes. That keeps `libavcodec.a`
-around 14MB rather than a stock build's bulk.
+disabled because this library only ever decodes. That keeps libavcodec around
+11MB on android/arm64 rather than a stock build's bulk.
 
 `--disable-autodetect` is deliberate. It stops `configure` from linking
 whatever happens to be installed on the build machine, which would make the
@@ -366,9 +362,9 @@ ship, so the DLL loads only where MinGW is on `PATH`. CI's Windows runners have
 it, which is why the build checks the DLL's imports against what Windows ships,
 plus the FFmpeg DLLs beside it.
 
-The static libraries still need **`--enable-pic`**: `--extra-cflags=-fPIC`
+**`--enable-pic`** stays in the base configure line: `--extra-cflags=-fPIC`
 covers the C only, and FFmpeg's hand-written assembly needs FFmpeg's own flag
-to be linked into a shared object.
+to be position-independent.
 
 ## Network sources
 
