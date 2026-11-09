@@ -89,14 +89,15 @@ func linkedFFmpeg(t *testing.T) map[string]bool {
 }
 
 // requireSharedFFmpeg is linkedFFmpeg for a binary that must link FFmpeg
-// dynamically. A goffmpeg-libs older than the shared link (v0.3.x) links the
-// static archives, so the binary imports none of them; that is a skip, not a
-// failure, until go.mod requires a goffmpeg-libs with the shared link (#40).
+// dynamically, as every build does from goffmpeg-libs v0.4.0 (#40). A binary
+// that imports none of the -goffmpeg libraries linked FFmpeg some other way:
+// a goffmpeg-libs older than v0.4.0 through a replace, or a CGO_LDFLAGS that
+// put another FFmpeg first.
 func requireSharedFFmpeg(t *testing.T) map[string]bool {
 	t.Helper()
 	got := linkedFFmpeg(t)
 	if len(got) == 0 {
-		t.Skip("this goffmpeg-libs links FFmpeg statically: the binary imports no -goffmpeg library (#40)")
+		t.Fatal("the binary imports no -goffmpeg library: FFmpeg isn't linked from goffmpeg-libs' shared/ (#40)")
 	}
 	return got
 }

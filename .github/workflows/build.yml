@@ -273,8 +273,7 @@ jobs:
       # just built, on both backends, rather than only linking it. The cgo
       # binary finds FFmpeg through its rpath to the module's shared/; purego
       # loads the bridge built above from dist/, which finds FFmpeg in
-      # ../shared. The link tests run verbosely, since they skip against a
-      # goffmpeg-libs that links FFmpeg statically.
+      # ../shared. The link tests run verbosely, so the log shows they ran.
       - name: Test ${{ matrix.target }}
         if: matrix.target == 'darwin_arm64'
         run: |
@@ -582,11 +581,6 @@ jobs:
         run: |
           $dir = go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' $env:LIBS_MOD
           $shared = Join-Path $dir "shared"
-          # goffmpeg-libs v0.3.x links FFmpeg statically and has no shared/.
-          if (-not (Test-Path (Join-Path $dir "libav_swscale.go"))) {
-            Write-Output "::notice::$dir links FFmpeg statically: no DLLs to put on PATH"
-            exit 0
-          }
           if (-not (Test-Path $shared)) { throw "no shared/ in $dir" }
           Write-Output "::notice::FFmpeg DLLs from $shared"
           Add-Content -Path $env:GITHUB_PATH -Value $shared
