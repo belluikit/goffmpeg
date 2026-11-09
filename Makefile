@@ -7,9 +7,9 @@ NPROC      := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 # ---------------------------------------------------------------------------
 # Target matrix
 #
-# Artifacts are laid out per platform as dist/<GOOS>_<GOARCH>/{include,lib}, so
-# one checkout can hold every target at once and cgo picks the right one via
-# the per-platform files in libav_*.go.
+# Artifacts are laid out per platform as dist/<GOOS>_<GOARCH>/shared (the
+# FFmpeg shared libraries) and, on desktop, dist/<GOOS>_<GOARCH>/lib (the purego
+# bridge), so one checkout can hold every target at once.
 #
 # Build one with:  make dist TARGET=darwin_amd64
 # Build the host:  make dist
@@ -20,7 +20,6 @@ HOST_OS   := $(shell uname -s | tr 'A-Z' 'a-z' | sed 's/^darwin$$/darwin/;s/^lin
 TARGET    ?= $(HOST_OS)_$(HOST_ARCH)
 
 DIST_DIR  := $(DIST_ROOT)/$(TARGET)
-BUILD_DIR := $(BUILD_ROOT)/$(TARGET)
 
 # Common flags. See the note in FFMPEG_CONF below on why autodetect stays off.
 #
@@ -158,11 +157,9 @@ FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF)
 
 # --- Shared libraries -------------------------------------------------------
 # Player's ADR-0037 D3 ships FFmpeg as shared libraries on every platform, so a
-# user can replace them (LGPL 2.1 §6b; goffmpeg-libs#14). dist-shared builds
-# them beside the static libraries, from a configure of their own: FFmpeg
-# refuses to build both at once for Windows ("Cannot build both shared and
-# static libs when using dllimport"), and one configure line per artifact is
-# what NOTICE records.
+# user can replace them (LGPL 2.1 §6b; goffmpeg-libs#14). They are the only
+# FFmpeg build: goffmpeg links nothing else since #40, and goffmpeg-libs
+# v0.4.0 was the last release to carry static archives (#45).
 #
 # The suffix keeps the names apart from any other FFmpeg in the same process or
 # package: a distro libavcodec.so.62 on Linux, an avcodec-62.dll another
@@ -198,7 +195,7 @@ endif
 
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
         bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths \
-        dist-shared check-shared smoke-shared
+        check-shared smoke-shared
 
 # `all` builds the host target only. Use dist-all for the full matrix.
 all: dist
@@ -244,24 +241,15 @@ patch-src: check-src
 print-config: check-src
 	@echo "TARGET      = $(TARGET)"
 	@echo "DIST_DIR    = $(DIST_DIR)"
-	@echo "FFMPEG_CONF = $(FFMPEG_CONF)"
+	@echo "FFMPEG_CONF = $(FFMPEG_CONF) $(SHARED_CONF)"
 
-# dist builds the static libraries for TARGET. Nothing links them any more:
-# the cgo build and the purego bridge load the shared ones (#40). They are
-# still built and published, and check-paths reads them.
+# dist builds the shared libraries for TARGET into $(DIST_DIR)/shared, each
+# file named as the loader will look for it (its soname, install name or DLL
+# name), with the import libraries beside the DLLs on Windows and one framework
+# per library on iOS. FFmpeg's own install tree is staged separately because it
+# is built of symlinks, which a Go module zip leaves out; sync-headers reads the
+# headers from it.
 dist: check-src patch-src
-	@mkdir -p "$(BUILD_DIR)"
-	cd "$(BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) --enable-static --disable-shared
-	$(MAKE) -C "$(BUILD_DIR)" -j$(NPROC)
-	$(MAKE) -C "$(BUILD_DIR)" install DESTDIR="$(DIST_ROOT)"
-	@echo "==> $(TARGET) installed to $(DIST_DIR)"
-
-# dist-shared builds the shared libraries for TARGET into $(DIST_DIR)/shared,
-# each file named as the loader will look for it (its soname, install name or
-# DLL name), with the import libraries beside the DLLs on Windows and one
-# framework per library on iOS. FFmpeg's own install tree is staged separately
-# because it is built of symlinks, which a Go module zip leaves out.
-dist-shared: check-src patch-src
 	@mkdir -p "$(SHARED_BUILD_DIR)"
 	cd "$(SHARED_BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
 	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC)
@@ -278,7 +266,7 @@ dist-shared: check-src patch-src
 # ship. It is the test that fails when a toolchain or FFmpeg bump changes how
 # the libraries are named.
 check-shared:
-	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	READELF="$(SHARED_READELF)" OBJDUMP="$(SHARED_OBJDUMP)" IOS_MIN="$(IOS_MIN)" \
 		scripts/check-shared.sh "$(TARGET)" "$(SHARED_DIR)"
 
@@ -334,7 +322,7 @@ ifeq ($(TARGET),windows_arm64)
 endif
 
 smoke-shared:
-	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	SMOKE_CC="$(SMOKE_CC)" SMOKE_RUN="$(SMOKE_RUN)" INCLUDE="$(ROOT)/internal/libav/include" \
 		scripts/smoke-shared.sh "$(TARGET)" "$(SHARED_DIR)" "$(SMOKE_DIR)" "$(ROOT)/testdata/sample.mp4"
 
@@ -351,7 +339,7 @@ dist-all:
 # Linux artifacts are produced in a container, which avoids needing a cross
 # toolchain on the host. Requires Docker with the target platform available
 # (arm64 hosts emulate amd64 through qemu and vice versa). DOCKER_GOALS picks
-# what it builds, e.g. DOCKER_GOALS="dist-shared smoke-shared".
+# what it builds, e.g. DOCKER_GOALS="dist smoke-shared".
 DOCKER_GOALS ?= dist
 linux-docker: check-src
 	docker run --rm --platform linux/$(subst linux_,,$(TARGET)) \
@@ -424,13 +412,15 @@ WIN_SYSLIBS = -lsecur32 -lbcrypt -lws2_32 -lole32 -loleaut32 -lstrmiids -luuid \
 # their names come from the files, so an FFmpeg bump needs no hand edit.
 LIBS_REPO ?= $(ROOT)/../goffmpeg-libs
 
+# The module's lib/ holds only the purego bridge, on desktop. sync-libs removes
+# the static archives it carried up to goffmpeg-libs v0.4.0 (#45), and a mobile
+# module, which has no bridge, is left with no lib/.
 sync-libs: check-paths
-	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
-	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
-	@mkdir -p "$(LIBS_REPO)/$(TARGET)/lib"
-	cp "$(DIST_DIR)"/lib/*.a "$(LIBS_REPO)/$(TARGET)/lib/"
-	@cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" 2>/dev/null && \
-		echo "    (including the purego shared bridge)" || true
+	rm -f "$(LIBS_REPO)/$(TARGET)"/lib/*.a
+	@if ls "$(DIST_DIR)"/lib/libgoffmpeg.* >/dev/null 2>&1; then \
+		mkdir -p "$(LIBS_REPO)/$(TARGET)/lib" && cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" && \
+		echo "    (including the purego shared bridge)"; fi
+	@rmdir "$(LIBS_REPO)/$(TARGET)/lib" 2>/dev/null || true
 	rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared"
 	scripts/gen-libav.sh $(TARGET) "$(LIBS_REPO)/$(TARGET)"
 	@echo "==> $(TARGET) libraries synced to $(LIBS_REPO)/$(TARGET)"
@@ -440,15 +430,12 @@ sync-libs: check-paths
 # published binaries, and self-hosted and local builds put their user's name
 # there (goffmpeg-libs#6). GitHub-hosted runners build as the generic `runner`,
 # which is allowed: the Android NDK and llvm-mingw's own CRT carry such paths
-# and cannot be told not to. "FFmpeg version" must be found in libavutil.a, so
-# a scan that reads nothing fails instead of passing.
+# and cannot be told not to. "FFmpeg version" must be found in the shared
+# libavutil, so a scan that reads nothing fails instead of passing.
 check-paths:
-	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
-	@LC_ALL=C grep -qa 'FFmpeg version' "$(DIST_DIR)/lib/libavutil.a" || { \
-		echo "check-paths: 'FFmpeg version' not found in libavutil.a, so the scan is not reading the libraries"; exit 1; }
-	@if [ -d "$(SHARED_DIR)" ]; then \
-		n=$$(find "$(SHARED_DIR)" -type f -name '*avutil*' -exec grep -la 'FFmpeg version' {} + | wc -l); \
-		[ "$$n" -ge 1 ] || { echo "check-paths: 'FFmpeg version' not found in the shared libavutil, so the scan is not reading shared/"; exit 1; }; fi
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
+	@n=$$(find "$(SHARED_DIR)" -type f -name '*avutil*' -exec grep -la 'FFmpeg version' {} + | wc -l); \
+		[ "$$n" -ge 1 ] || { echo "check-paths: 'FFmpeg version' not found in the shared libavutil, so the scan is not reading shared/"; exit 1; }
 	@bad=$$(find "$(DIST_DIR)/lib" "$(DIST_DIR)/shared" -type f 2>/dev/null | while read -r f; do \
 		LC_ALL=C grep -aoE '/(Users|home)/[A-Za-z0-9._-]+/' "$$f" | grep -vxE '/(Users|home)/runner/' | sed "s|^|$${f#$(DIST_DIR)/}: |"; \
 		done | sort | uniq -c); \
@@ -456,22 +443,23 @@ check-paths:
 	@echo "==> $(TARGET): no personal home directories in lib/ or shared/"
 
 # The FFmpeg public headers are identical for every target, so one copy lives
-# in this module and all platforms compile against it.
+# in this module and all platforms compile against it. They come from the
+# shared build's install tree.
 sync-headers:
-	@test -d "$(DIST_DIR)/include" || { echo "no build for $(TARGET)"; exit 1; }
+	@test -d "$(SHARED_STAGE)/$(TARGET)/include" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	rm -rf "$(ROOT)/internal/libav/include"
-	cp -R "$(DIST_DIR)/include" "$(ROOT)/internal/libav/include"
+	cp -R "$(SHARED_STAGE)/$(TARGET)/include" "$(ROOT)/internal/libav/include"
 	@echo "==> headers refreshed from $(TARGET)"
 
 # The purego backend dlopens this. It loads FFmpeg as shared libraries, the
-# ones dist-shared builds, so a package carries libgoffmpeg beside them (#40).
+# ones dist builds, so a package carries libgoffmpeg beside them (#40).
 #
-# Deliberately not dependent on `dist-shared`: the libraries are usually
-# already built (or synced from a companion module), and re-running
-# configure+make to produce a 35KB wrapper wastes minutes.
+# Deliberately not dependent on `dist`: the libraries are usually already
+# built (or synced from a companion module), and re-running configure+make to
+# produce a 75KB wrapper wastes minutes.
 bridge-shared:
 	@test -d "$(SHARED_DIR)" || { \
-		echo "no shared libraries for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
+		echo "no shared libraries for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	@mkdir -p "$(DIST_DIR)/lib"
 	$(BRIDGE_CC) -shared -fPIC $(BRIDGE_LDFLAGS) \
 		-o "$(DIST_DIR)/lib/libgoffmpeg.$(LIB_EXT)" \
@@ -489,7 +477,7 @@ test-purego: bridge-shared
 	CGO_ENABLED=0 go test ./...
 
 clean:
-	rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" "$(SHARED_BUILD_DIR)" "$(SHARED_STAGE)" "$(SMOKE_DIR)"
+	rm -rf "$(DIST_DIR)" "$(SHARED_BUILD_DIR)" "$(SHARED_STAGE)" "$(SMOKE_DIR)"
 
 clean-all:
 	rm -rf "$(BUILD_ROOT)" "$(DIST_ROOT)"
