@@ -1,13 +1,16 @@
 # Building goffmpeg
 
-goffmpeg links against a purpose-built FFmpeg. The static libraries are
-distributed as per-platform companion modules; cgo selects the right one
-through the build-tagged files (`libav_darwin_arm64.go` and friends).
+goffmpeg loads a purpose-built FFmpeg as shared libraries (Player ADR-0037 D3,
+#40). The libraries are distributed as per-platform companion modules; cgo
+selects the right one through the build-tagged files (`libav_darwin_arm64.go`
+and friends).
 
 ## Where the artifacts come from
 
-Nothing needs doing: `go build` resolves them. The static libraries are
-published as one module per platform under
+Nothing needs doing on macOS and Linux: `go build` resolves them, and `go run`
+and `go test` find them in the module cache through an rpath. Windows needs one
+step, under [Linking](#linking). The libraries are published as one module per
+platform under
 [goffmpeg-libs](https://github.com/belluikit/goffmpeg-libs), and each
 `libav_<target>.go` blank-imports the matching one under a build constraint:
 
@@ -18,7 +21,7 @@ import _ "github.com/belluikit/goffmpeg-libs/darwin_arm64"
 ```
 
 The blank import contributes that platform's `#cgo LDFLAGS`, which propagate to
-the final link. Because each platform is a separate module, a build downloads
+the final link. `make sync-libs` writes them (see [Linking](#linking)). Because each platform is a separate module, a build downloads
 only its own — around 20-30MB rather than the ~245MB all eleven would cost.
 
 The FFmpeg *headers* are identical for every target, so one copy lives here in
@@ -32,8 +35,9 @@ Needed when bumping FFmpeg or changing its configuration:
 ```sh
 git clone https://github.com/FFmpeg/FFmpeg.git ../ffmpeg
 git -C ../ffmpeg checkout --detach e2bc6d88cd68184288c16570e04881c3a426a05a
-make dist TARGET=linux_amd64        # build
-make sync-libs TARGET=linux_amd64   # copy into ../goffmpeg-libs
+make dist TARGET=linux_amd64         # build the static libraries
+make dist-shared TARGET=linux_amd64  # build the shared ones, which are linked
+make sync-libs TARGET=linux_amd64    # copy into ../goffmpeg-libs, write its link files
 ```
 
 `make dist` alone builds the host target; `make dist-all` builds everything this
@@ -81,7 +85,7 @@ mistaken for another FFmpeg in the same process or package: a distro
 it: "Do not rename FFmpeg dlls to some obfuscated name, but adding a suffix or
 prefix is fine".
 
-| Target | Files in `shared/` | How a consumer finds them |
+| Target | Files in `shared/` | How the loader finds them |
 |---|---|---|
 | `darwin_*` | `libavcodec-goffmpeg.63.dylib`, install name `@rpath/libavcodec-goffmpeg.63.dylib` | the executable's rpath |
 | `ios_arm64`, `iossimulator_arm64` | `libavcodec-goffmpeg.framework`, install name `@rpath/libavcodec-goffmpeg.framework/libavcodec-goffmpeg`, `Info.plist`, ad-hoc signed | `@executable_path/Frameworks`, where the app embeds and re-signs them |
@@ -96,9 +100,51 @@ leaves symlinks out. Android's soname has no version because an APK installs
 only `lib*.so`.
 
 The libraries carry no rpath of their own: whatever loads them supplies it.
-`shared/` is a directory of its own, not `lib/`, for the same reason it is a
-separate configure: the cgo directives link `-L${SRCDIR}/lib -lavcodec`, and a
-linker that found a shared library there would prefer it to the static one.
+`shared/` is a directory of its own, not `lib/`, so that a `-L` pointing at the
+static archives can never pick a shared library instead.
+
+### Linking
+
+Both backends load these libraries; nothing links the static archives in
+`lib/` any more (#40). They are still built and published.
+
+`make sync-libs` writes each goffmpeg-libs module's link files from the files
+in its `shared/` (`scripts/gen-libav.sh`), so the version numbers in the names
+are never typed by hand and an FFmpeg bump needs no edit:
+
+- `libav.go` links every library but libswscale.
+- `libav_swscale.go` links libswscale, under `!goffmpeg_novideo`. An audio-only
+  build never calls it, and a linker records a library linked by path even when
+  nothing calls it, so a binary that still named it would not load from a
+  package without it.
+
+Each library is linked by file, because a Go module zip leaves out the
+`libavcodec.dylib`- or `libavcodec.so`-style symlinks that `-lavcodec` would
+need. On Linux that is `-l:libavcodec-goffmpeg.so.63`: cgo refuses a path
+ending in `.so.63`.
+
+| Target | Running from source (`go run`, `go test`) | A packaged app |
+|---|---|---|
+| `darwin_*`, `linux_*` | an rpath to the module's `shared/`, in the module cache | the packager copies the libraries and replaces that rpath with its own (`@executable_path/../Frameworks`, `$ORIGIN`): the module's rpath names the build machine's module cache |
+| `ios_*` | not run | the app embeds the frameworks and links with `-Wl,-rpath,@executable_path/Frameworks`. cgo refuses an rpath that starts with `@`, so the module cannot supply it |
+| `android_*` | not run | the APK's `lib/<abi>/` |
+| `windows_*` | **`shared/` on `PATH`**, see below | the DLLs beside the executable |
+
+Windows has no rpath, so a binary that `go test` or `go run` builds in a
+temporary directory does not find the DLLs in the module cache. Put the
+module's `shared/` on `PATH` first:
+
+```powershell
+$env:PATH = "$(go list -m -f '{{.Dir}}' github.com/belluikit/goffmpeg-libs/windows_amd64)\shared;$env:PATH"
+```
+
+CI does the same in its Windows test legs.
+
+A package should copy the libraries its binary lists (`otool -L`, `readelf -d`,
+`objdump -p`), not every file in `shared/`: an audio-only binary lists no
+libswscale. `scripts/check-links.sh` checks a built binary the same way. CI runs
+it on every target it links, with and without `goffmpeg_novideo`, and
+`TestLinksSharedFFmpeg` checks it from inside wherever the tests run.
 
 `dist-shared` ends with `make check-shared`, which reads every library the way
 its loader will. It checks that the library's own name is its file name, and
@@ -210,8 +256,9 @@ produces one:
     CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC=<ndk>/aarch64-linux-android21-clang \
       env -u CGO_CFLAGS -u CGO_LDFLAGS go test -c -o /dev/null .
 
-CI runs this for every cross target, and the real suite on the targets whose
-runner is the target platform.
+CI runs this for every cross target, then `scripts/check-links.sh` on the
+binary, and the real suite on the targets whose runner is the target platform:
+darwin_arm64, linux_amd64, linux_arm64 and both Windows targets.
 
 ## What is in the build
 
@@ -295,29 +342,33 @@ first `---`, so the file is both a working patch and its own rationale.
 
 ## cgo and purego
 
-The cgo backend links the static libraries directly and is the supported path;
-it is also the only one with `OpenReader` (custom AVIO), because feeding
-libavformat from an `io.Reader` requires C calling back into Go.
+The cgo backend compiles the bridge into the binary and loads FFmpeg's shared
+libraries (see [Linking](#linking)). It is the supported path, and the only one
+with `OpenReader` (custom AVIO), because feeding libavformat from an
+`io.Reader` requires C calling back into Go.
 
 The purego backend (`CGO_ENABLED=0`) dlopens `libgoffmpeg.{so,dll,dylib}`,
-which every desktop companion module now ships. Build one with
-`make bridge-shared TARGET=<target>`; it embeds the static FFmpeg libraries, so
-the result is a single self-contained object.
+which every desktop companion module ships in `lib/`. Build one with
+`make bridge-shared TARGET=<target>`. It loads the same shared FFmpeg
+libraries, so a purego app ships it beside them (#40). On macOS and Linux it
+looks for them beside itself and in `../shared`, which is where they are in
+`dist/<target>` and in a goffmpeg-libs module. On Windows they must be beside
+the executable or on `PATH`.
 
-Three flags matter for it, all learned the hard way:
+The bridge exports FFmpeg's log level as `decoder_log_set_level` and
+`decoder_log_get_level`. purego looks every symbol up in libgoffmpeg's handle,
+and on Windows that finds only what the DLL itself exports, not FFmpeg's
+`av_log_set_level`, which it imports.
 
-- **`--enable-pic`** — `--extra-cflags=-fPIC` covers the C only. FFmpeg's
-  hand-written assembly needs FFmpeg's own flag, or linking the static
-  libraries into a shared object fails on x86_64 *and* aarch64.
-- **`-Wl,-Bsymbolic`** on Linux — the assembly addresses global tables with
-  page-relative relocations, which are only valid when the symbol cannot be
-  interposed at load time. Without it the linker reports
-  "may bind externally ... recompile with -fPIC", which is misleading: the
-  objects are already PIC.
-- **`-static-libgcc`** for windows_amd64 — mingw-w64 GCC otherwise links its
-  runtime as `libgcc_s_seh-1.dll`, which Windows does not ship, so the DLL
-  loads only where MinGW is on `PATH`. CI's Windows runners have it, which is
-  why the build now checks the DLL's imports against what Windows ships.
+**`-static-libgcc`** for windows_amd64 matters, learned the hard way: mingw-w64
+GCC otherwise links its runtime as `libgcc_s_seh-1.dll`, which Windows does not
+ship, so the DLL loads only where MinGW is on `PATH`. CI's Windows runners have
+it, which is why the build checks the DLL's imports against what Windows ships,
+plus the FFmpeg DLLs beside it.
+
+The static libraries still need **`--enable-pic`**: `--extra-cflags=-fPIC`
+covers the C only, and FFmpeg's hand-written assembly needs FFmpeg's own flag
+to be linked into a shared object.
 
 ## Network sources
 

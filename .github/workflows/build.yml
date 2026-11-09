@@ -80,13 +80,20 @@ jobs:
       # The purego leg matters: without a decode test here, a missing or
       # unloadable shared object is invisible — Open fails with "library not
       # loaded", and a test that only checks that a bad path errors still passes.
+      #
+      # A bridge that loads FFmpeg as shared libraries (#40) finds them in
+      # ../shared, so the module's shared/ is staged beside lib/ as well.
       - name: Stage the purego shared library
         run: |
           V=$(go list -m -f '{{.Version}}' github.com/belluikit/goffmpeg-libs/darwin_arm64)
-          SRC="$(go env GOMODCACHE)/github.com/belluikit/goffmpeg-libs/darwin_arm64@$V/lib/libgoffmpeg.dylib"
-          test -f "$SRC" || { echo "::error::no shared library in $SRC"; exit 1; }
+          MOD="$(go env GOMODCACHE)/github.com/belluikit/goffmpeg-libs/darwin_arm64@$V"
+          test -f "$MOD/lib/libgoffmpeg.dylib" || { echo "::error::no shared library in $MOD/lib"; exit 1; }
           mkdir -p internal/libav/dist/darwin_arm64/lib
-          cp "$SRC" internal/libav/dist/darwin_arm64/lib/
+          cp "$MOD/lib/libgoffmpeg.dylib" internal/libav/dist/darwin_arm64/lib/
+          if [ -d "$MOD/shared" ]; then
+            rm -rf internal/libav/dist/darwin_arm64/shared
+            cp -R "$MOD/shared" internal/libav/dist/darwin_arm64/shared
+          fi
 
       - name: Test (purego)
         run: CGO_ENABLED=0 go test -count=1 ./...
@@ -196,7 +203,7 @@ jobs:
       # FFmpeg with --disable-avdevice and have no purego consumer.
       #
       # darwin_amd64 cross-builds from this arm64 machine — the Makefile picks
-      # the -arch, and the static libraries it links are the ones just built.
+      # the -arch, and the shared libraries it links are the ones just built.
       - name: Shared bridge ${{ matrix.target }}
         if: startsWith(matrix.target, 'darwin_')
         run: make bridge-shared TARGET=${{ matrix.target }}
@@ -247,8 +254,44 @@ jobs:
           # A developer shell often exports these pointing at Homebrew, which
           # would supply a different FFmpeg to a cross build.
           unset CGO_CFLAGS CGO_LDFLAGS
-          CGO_ENABLED=1 go test -c -o /dev/null ${TAGS:+-tags $TAGS} .
+          # The binary must load FFmpeg as shared libraries: import each one by
+          # the name its loader looks for, and define none of FFmpeg itself.
+          # The audio-only build must not import libswscale, or a package
+          # without it would not load (#40). sync-libs wrote the cgo link
+          # files this links with (scripts/gen-libav.sh).
+          case "${{ matrix.target }}" in
+            android_*) export READELF="$BIN/llvm-readelf" NM="$BIN/llvm-nm" ;;
+          esac
+          SHARED="$RUNNER_TEMP/libs/${{ matrix.target }}/shared"
+          CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link.test" ${TAGS:+-tags $TAGS} .
+          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link.test" "$SHARED"
+          CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link-novideo.test" -tags "${TAGS:+$TAGS,}goffmpeg_novideo" .
+          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link-novideo.test" "$SHARED" novideo
           git checkout go.mod
+
+      # This runner is darwin_arm64, so run the suite against the libraries
+      # just built, on both backends, rather than only linking it. The cgo
+      # binary finds FFmpeg through its rpath to the module's shared/; purego
+      # loads the bridge built above from dist/, which finds FFmpeg in
+      # ../shared. The link tests run verbosely, since they skip against a
+      # goffmpeg-libs that links FFmpeg statically.
+      - name: Test ${{ matrix.target }}
+        if: matrix.target == 'darwin_arm64'
+        run: |
+          go mod edit -replace \
+            github.com/belluikit/goffmpeg-libs/darwin_arm64="$RUNNER_TEMP/libs/darwin_arm64"
+          # Prove it: the replace must resolve to the clone, not the cache.
+          go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
+            github.com/belluikit/goffmpeg-libs/darwin_arm64
+          unset CGO_CFLAGS CGO_LDFLAGS
+          go test -race -count=1 ./...
+          go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
+          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|TestLinksSharedFFmpeg' .
+          CGO_ENABLED=0 go test -count=1 ./...
+
+      - name: Restore go.mod
+        if: always() && matrix.target == 'darwin_arm64'
+        run: git checkout go.mod
 
       - uses: actions/upload-artifact@v7
         with:
@@ -323,7 +366,7 @@ jobs:
         run: make bridge-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw
 
       # purego dlopens the bridge on machines that have nothing but Windows, so
-      # every DLL it imports must ship with Windows. The test legs cannot catch
+      # every DLL it imports must ship with Windows, or with the bridge. The test legs cannot catch
       # a stray one: GitHub's Windows runners have MinGW on PATH, and that is
       # how a dependency on libgcc_s_seh-1.dll shipped unnoticed (#26). An
       # empty import list fails too, so a broken read cannot pass as clean.
@@ -338,7 +381,13 @@ jobs:
           imports=$($OBJDUMP -p "$DLL" | awk '/DLL Name:/{print $3}' | sort -fu)
           if [ -z "$imports" ]; then echo "::error::read no imports from $DLL"; exit 1; fi
           echo "$imports"
-          bad=$(echo "$imports" | grep -viE '^(api-ms-win-crt-[a-z0-9-]+|avicap32|bcrypt|crypt32|gdi32|kernel32|mfplat|msvcrt|ncrypt|ole32|oleaut32|secur32|shlwapi|user32|ws2_32)\.dll$' || true)
+          # The FFmpeg DLLs are not Windows', but they ship beside the bridge
+          # (#40): allowed by name, and each must be in shared/.
+          for dll in $(echo "$imports" | grep -iE -- '-goffmpeg-[0-9]+\.dll$' || true); do
+            test -f "internal/libav/dist/${{ matrix.target }}/shared/$dll" \
+              || { echo "::error::$DLL imports $dll, which shared/ does not have"; exit 1; }
+          done
+          bad=$(echo "$imports" | grep -viE '^(api-ms-win-crt-[a-z0-9-]+|avicap32|bcrypt|crypt32|gdi32|kernel32|mfplat|msvcrt|ncrypt|ole32|oleaut32|secur32|shlwapi|user32|ws2_32|(avdevice|avformat|avcodec|swresample|swscale|avutil)-goffmpeg-[0-9]+)\.dll$' || true)
           if [ -n "$bad" ]; then
             echo "::error::$DLL imports DLLs Windows does not ship: $(echo $bad)"
             exit 1
@@ -364,8 +413,18 @@ jobs:
             windows_amd64) export GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc ;;
             windows_arm64) export GOOS=windows GOARCH=arm64 CC=/opt/llvm-mingw/bin/aarch64-w64-mingw32-gcc ;;
           esac
+          case "${{ matrix.target }}" in
+            windows_amd64) export OBJDUMP=x86_64-w64-mingw32-objdump ;;
+            windows_arm64) export OBJDUMP=/opt/llvm-mingw/bin/llvm-objdump ;;
+          esac
           unset CGO_CFLAGS CGO_LDFLAGS
-          CGO_ENABLED=1 go test -c -o /dev/null .
+          # As in the apple-android link check: shared FFmpeg, by the names the
+          # loader looks for, and no libswscale in the audio-only build (#40).
+          SHARED="$RUNNER_TEMP/libs/${{ matrix.target }}/shared"
+          CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link.test" .
+          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link.test" "$SHARED"
+          CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link-novideo.test" -tags goffmpeg_novideo .
+          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link-novideo.test" "$SHARED" novideo
           git checkout go.mod
 
       # This runner is the linux/amd64 target, so run the suite rather than
@@ -375,7 +434,7 @@ jobs:
       # when it finishes, and without it this would link the *published*
       # companion module instead of the FFmpeg this job just built —
       # libav_linux_amd64.go blank-imports goffmpeg-libs/linux_amd64, whose
-      # `#cgo LDFLAGS: -L${SRCDIR}/lib` resolves into the module cache.
+      # cgo link flags resolve ${SRCDIR} into the module cache.
       #
       # That is the same hole linux_arm64 had. It is worth being blunt about
       # what it costs: a patch to FFmpeg was compiled on that runner and never
@@ -391,6 +450,8 @@ jobs:
           go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
             github.com/belluikit/goffmpeg-libs/linux_amd64
           go test -race -count=1 ./...
+          go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
+          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|TestLinksSharedFFmpeg' .
 
       - name: Restore go.mod
         if: always() && matrix.target == 'linux_amd64'
@@ -512,6 +573,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
           Copy-Item $dll $dst
 
+      # Windows has no rpath. A binary go test builds, and the bridge purego
+      # loads, find the FFmpeg DLLs through PATH: the module's shared/, as a
+      # developer sets it (BUILDING.md, #40). A package puts them beside the
+      # executable instead.
+      - name: Put the FFmpeg DLLs on PATH
+        shell: pwsh
+        run: |
+          $dir = go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' $env:LIBS_MOD
+          $shared = Join-Path $dir "shared"
+          # goffmpeg-libs v0.3.x links FFmpeg statically and has no shared/.
+          if (-not (Test-Path (Join-Path $dir "libav_swscale.go"))) {
+            Write-Output "::notice::$dir links FFmpeg statically: no DLLs to put on PATH"
+            exit 0
+          }
+          if (-not (Test-Path $shared)) { throw "no shared/ in $dir" }
+          Write-Output "::notice::FFmpeg DLLs from $shared"
+          Add-Content -Path $env:GITHUB_PATH -Value $shared
+
       # The shared FFmpeg DLLs, cross-built on Linux, run on Windows: they
       # load, find each other beside the executable, and decode a file. Only
       # when the matrix ran, since the published modules carry no shared/
@@ -583,8 +662,8 @@ jobs:
 
       # Without this the tests below link the *published* companion module, not
       # the FFmpeg this job just built — libav_linux_arm64.go blank-imports
-      # goffmpeg-libs/linux_arm64, and its `#cgo LDFLAGS: -L${SRCDIR}/lib`
-      # resolves into the module cache.
+      # goffmpeg-libs/linux_arm64, and its cgo link flags resolve ${SRCDIR}
+      # into the module cache.
       #
       # So this leg built FFmpeg and then tested a different one. Every other
       # job does the replace for its link check; this is the only one that runs
@@ -620,7 +699,10 @@ jobs:
         run: go test -count=1 -v -run TestOpenDeviceV4L2Reopen .
 
       - name: Test (cgo)
-        run: go test -race -count=1 ./...
+        run: |
+          go test -race -count=1 ./...
+          go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
+          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|TestLinksSharedFFmpeg' .
 
       - name: Test (purego)
         run: CGO_ENABLED=0 go test -count=1 ./...
