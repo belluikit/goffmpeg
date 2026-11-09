@@ -156,8 +156,49 @@ endif
 
 FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF)
 
+# --- Shared libraries -------------------------------------------------------
+# Player's ADR-0037 D3 ships FFmpeg as shared libraries on every platform, so a
+# user can replace them (LGPL 2.1 §6b; goffmpeg-libs#14). dist-shared builds
+# them beside the static libraries, from a configure of their own: FFmpeg
+# refuses to build both at once for Windows ("Cannot build both shared and
+# static libs when using dllimport"), and one configure line per artifact is
+# what NOTICE records.
+#
+# The suffix keeps the names apart from any other FFmpeg in the same process or
+# package: a distro libavcodec.so.62 on Linux, an avcodec-62.dll another
+# component loaded on Windows, another SDK's libavcodec.so in an APK. FFmpeg's
+# checklist (ffmpeg.org/legal.html) allows it: "Do not rename FFmpeg dlls to
+# some obfuscated name, but adding a suffix or prefix is fine".
+#
+# The libraries carry no rpath of their own. Whatever loads them supplies it:
+# the executable's rpath on macOS and Linux, the app's lib/<abi> on Android,
+# the executable's directory on Windows.
+SHARED_SUFFIX    := -goffmpeg
+SHARED_BUILD_DIR := $(BUILD_ROOT)/$(TARGET)-shared
+SHARED_STAGE     := $(BUILD_ROOT)/$(TARGET)-shared-install
+SHARED_DIR       := $(DIST_DIR)/shared
+
+SHARED_CONF = --enable-shared --disable-static --build-suffix=$(SHARED_SUFFIX)
+# Apple: @rpath install names, so a consumer finds the libraries through its
+# own rpath. The iOS ones are then rewrapped as frameworks.
+ifneq ($(filter darwin_% ios_% iossimulator_%,$(TARGET)),)
+	SHARED_CONF += --install-name-dir=@rpath
+endif
+# Android 15 devices can use 16KB pages, and Google Play requires native
+# libraries aligned for them. NDK r28+ does this by default; saying it keeps
+# an older NDK from quietly producing 4KB-aligned libraries.
+ifneq ($(filter android_%,$(TARGET)),)
+	SHARED_CONF += --extra-ldsoflags=-Wl,-z,max-page-size=16384
+endif
+# Same reason as the bridge's -static-libgcc below (#26): without it every DLL
+# imports libgcc_s_seh-1.dll, which Windows does not ship.
+ifeq ($(TARGET),windows_amd64)
+	SHARED_CONF += --extra-ldsoflags=-static-libgcc
+endif
+
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
-        bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths
+        bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths \
+        dist-shared check-shared smoke-shared
 
 # `all` builds the host target only. Use dist-all for the full matrix.
 all: dist
@@ -214,6 +255,88 @@ dist: check-src patch-src
 	$(MAKE) -C "$(BUILD_DIR)" install DESTDIR="$(DIST_ROOT)"
 	@echo "==> $(TARGET) installed to $(DIST_DIR)"
 
+# dist-shared builds the shared libraries for TARGET into $(DIST_DIR)/shared,
+# each file named as the loader will look for it (its soname, install name or
+# DLL name), with the import libraries beside the DLLs on Windows and one
+# framework per library on iOS. FFmpeg's own install tree is staged separately
+# because it is built of symlinks, which a Go module zip leaves out.
+dist-shared: check-src patch-src
+	@mkdir -p "$(SHARED_BUILD_DIR)"
+	cd "$(SHARED_BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
+	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC)
+	rm -rf "$(SHARED_STAGE)"
+	$(MAKE) -C "$(SHARED_BUILD_DIR)" install DESTDIR="$(SHARED_STAGE)"
+	IOS_MIN="$(IOS_MIN)" scripts/stage-shared.sh "$(TARGET)" "$(SHARED_STAGE)/$(TARGET)" "$(SHARED_DIR)"
+	@$(MAKE) --no-print-directory check-shared TARGET=$(TARGET)
+	@echo "==> $(TARGET) shared libraries installed to $(SHARED_DIR)"
+
+# check-shared refuses a shared build whose names or links would not load: a
+# soname or install name that is not the file's own name, a dependency on a
+# library that is neither beside it nor part of the OS, a text relocation
+# (Android refuses those), 4KB alignment on Android, a DLL Windows does not
+# ship. It is the test that fails when a toolchain or FFmpeg bump changes how
+# the libraries are named.
+check-shared:
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
+	READELF="$(SHARED_READELF)" OBJDUMP="$(SHARED_OBJDUMP)" IOS_MIN="$(IOS_MIN)" \
+		scripts/check-shared.sh "$(TARGET)" "$(SHARED_DIR)"
+
+# Tools check-shared reads the binaries with, by target rather than by host.
+SHARED_READELF ?= readelf
+ifneq ($(filter android_%,$(TARGET)),)
+	SHARED_READELF = $(NDK_BIN)/llvm-readelf
+endif
+SHARED_OBJDUMP ?= objdump
+ifeq ($(TARGET),windows_amd64)
+	SHARED_OBJDUMP = x86_64-w64-mingw32-objdump
+endif
+ifeq ($(TARGET),windows_arm64)
+	SHARED_OBJDUMP = $(LLVM_MINGW)/bin/llvm-objdump
+endif
+
+# smoke-shared links a small C program against the shared libraries alone and,
+# where this machine can execute the target, runs it: it decodes a test file
+# and checks that the libraries it loaded are the shared build. Linking proves
+# the import names resolve; running proves the loader finds each library and
+# its dependencies the way a consumer will, through an rpath.
+SMOKE_DIR := $(BUILD_ROOT)/$(TARGET)-smoke
+SMOKE_RUN ?= auto
+ifeq ($(TARGET),darwin_arm64)
+	SMOKE_CC = clang -arch arm64 -mmacosx-version-min=$(MACOS_MIN)
+endif
+ifeq ($(TARGET),darwin_amd64)
+	SMOKE_CC = clang -arch x86_64 -mmacosx-version-min=$(MACOS_MIN)
+endif
+ifeq ($(TARGET),ios_arm64)
+	SMOKE_CC = clang -arch arm64 -isysroot $(IOS_SDK) -mios-version-min=$(IOS_MIN)
+endif
+ifeq ($(TARGET),iossimulator_arm64)
+	SMOKE_CC = clang -arch arm64 -isysroot $(SIM_SDK) -mios-simulator-version-min=$(IOS_MIN)
+endif
+ifeq ($(TARGET),android_arm64)
+	SMOKE_CC = $(NDK_BIN)/aarch64-linux-android$(ANDROID_API)-clang
+endif
+ifeq ($(TARGET),android_arm)
+	SMOKE_CC = $(NDK_BIN)/armv7a-linux-androideabi$(ANDROID_API)-clang
+endif
+ifeq ($(TARGET),android_amd64)
+	SMOKE_CC = $(NDK_BIN)/x86_64-linux-android$(ANDROID_API)-clang
+endif
+ifneq ($(filter linux_%,$(TARGET)),)
+	SMOKE_CC = cc
+endif
+ifeq ($(TARGET),windows_amd64)
+	SMOKE_CC = x86_64-w64-mingw32-gcc
+endif
+ifeq ($(TARGET),windows_arm64)
+	SMOKE_CC = $(LLVM_MINGW)/bin/aarch64-w64-mingw32-gcc
+endif
+
+smoke-shared:
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
+	SMOKE_CC="$(SMOKE_CC)" SMOKE_RUN="$(SMOKE_RUN)" INCLUDE="$(ROOT)/internal/libav/include" \
+		scripts/smoke-shared.sh "$(TARGET)" "$(SHARED_DIR)" "$(SMOKE_DIR)" "$(ROOT)/testdata/sample.mp4"
+
 # Every target this host can build without a container or extra toolchain.
 HOST_TARGETS = darwin_arm64 darwin_amd64 ios_arm64 iossimulator_arm64 \
                android_arm64 android_arm android_amd64
@@ -226,7 +349,9 @@ dist-all:
 
 # Linux artifacts are produced in a container, which avoids needing a cross
 # toolchain on the host. Requires Docker with the target platform available
-# (arm64 hosts emulate amd64 through qemu and vice versa).
+# (arm64 hosts emulate amd64 through qemu and vice versa). DOCKER_GOALS picks
+# what it builds, e.g. DOCKER_GOALS="dist-shared smoke-shared".
+DOCKER_GOALS ?= dist
 linux-docker: check-src
 	docker run --rm --platform linux/$(subst linux_,,$(TARGET)) \
 		-v "$(ROOT)":/work -v "$(FFMPEG_SRC)":/ffmpeg -w /work \
@@ -234,7 +359,7 @@ linux-docker: check-src
 			set -e; \
 			apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 				build-essential yasm nasm pkg-config libssl-dev make patch >/dev/null; \
-			make dist TARGET=$(TARGET) FFMPEG_SRC=/ffmpeg NPROC=$$(nproc)'
+			make $(DOCKER_GOALS) TARGET=$(TARGET) FFMPEG_SRC=/ffmpeg NPROC=$$(nproc)'
 
 # Toolchain and system libraries for the shared bridge, selected by TARGET
 # rather than by host: the Windows bridge is cross-built from Linux.
@@ -301,6 +426,9 @@ sync-libs: check-paths
 	cp "$(DIST_DIR)"/lib/*.a "$(LIBS_REPO)/$(TARGET)/lib/"
 	@cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" 2>/dev/null && \
 		echo "    (including the purego shared bridge)" || true
+	@if [ -d "$(SHARED_DIR)" ]; then \
+		rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared" && \
+		echo "    (including the shared FFmpeg libraries)"; fi
 	@echo "==> $(TARGET) libraries synced to $(LIBS_REPO)/$(TARGET)"
 
 # check-paths refuses a build whose libraries name a personal home directory.
@@ -314,11 +442,14 @@ check-paths:
 	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	@LC_ALL=C grep -qa 'FFmpeg version' "$(DIST_DIR)/lib/libavutil.a" || { \
 		echo "check-paths: 'FFmpeg version' not found in libavutil.a, so the scan is not reading the libraries"; exit 1; }
-	@bad=$$(for f in "$(DIST_DIR)"/lib/*; do \
-		LC_ALL=C grep -aoE '/(Users|home)/[A-Za-z0-9._-]+/' "$$f" | grep -vxE '/(Users|home)/runner/' | sed "s|^|$$(basename $$f): |"; \
+	@if [ -d "$(SHARED_DIR)" ]; then \
+		n=$$(find "$(SHARED_DIR)" -type f -name '*avutil*' -exec grep -la 'FFmpeg version' {} + | wc -l); \
+		[ "$$n" -ge 1 ] || { echo "check-paths: 'FFmpeg version' not found in the shared libavutil, so the scan is not reading shared/"; exit 1; }; fi
+	@bad=$$(find "$(DIST_DIR)/lib" "$(DIST_DIR)/shared" -type f 2>/dev/null | while read -r f; do \
+		LC_ALL=C grep -aoE '/(Users|home)/[A-Za-z0-9._-]+/' "$$f" | grep -vxE '/(Users|home)/runner/' | sed "s|^|$${f#$(DIST_DIR)/}: |"; \
 		done | sort | uniq -c); \
 	if [ -n "$$bad" ]; then echo "check-paths: $(TARGET) libraries name a personal home directory:"; echo "$$bad"; exit 1; fi
-	@echo "==> $(TARGET): no personal home directories in lib/"
+	@echo "==> $(TARGET): no personal home directories in lib/ or shared/"
 
 # The FFmpeg public headers are identical for every target, so one copy lives
 # in this module and all platforms compile against it.
@@ -354,7 +485,7 @@ test-purego: bridge-shared
 	CGO_ENABLED=0 go test ./...
 
 clean:
-	rm -rf "$(BUILD_DIR)" "$(DIST_DIR)"
+	rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" "$(SHARED_BUILD_DIR)" "$(SHARED_STAGE)" "$(SMOKE_DIR)"
 
 clean-all:
 	rm -rf "$(BUILD_ROOT)" "$(DIST_ROOT)"

@@ -104,7 +104,7 @@ jobs:
           # patches/ counts: it changes the FFmpeg sources the artifacts are
           # built from, so a patch added without a rebuild ships libraries that
           # do not contain it — silently, since nothing here would notice.
-          if git diff --name-only HEAD~1 HEAD | grep -qE '^(Makefile|bridge\.c|bridge\.h|bridge_reader\.c|patches/.+\.patch|\.github/workflows/build\.yml)$'; then
+          if git diff --name-only HEAD~1 HEAD | grep -qE '^(Makefile|bridge\.c|bridge\.h|bridge_reader\.c|patches/.+\.patch|scripts/.+\.sh|testdata/sharedsmoke/.+|\.github/workflows/build\.yml)$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -165,6 +165,26 @@ jobs:
 
       - name: Build ${{ matrix.target }}
         run: make dist TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
+
+      # The shared libraries apps ship (Player ADR-0037 D3, goffmpeg-libs#14),
+      # from a configure of their own. dist-shared ends with check-shared, which
+      # fails on a name or dependency the loader would not resolve.
+      - name: Shared libraries ${{ matrix.target }}
+        run: make dist-shared TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
+
+      # Decodes a file through the shared libraries alone, where this machine
+      # can run the target: macOS natively, the simulator slice in a booted
+      # simulator, darwin_amd64 under Rosetta when the image has it. The device
+      # and Android slices only link. The last line of the log says "ran" or
+      # "linked", and SMOKE_RUN=1 fails rather than falling back to a link.
+      - name: Smoke-test the shared libraries ${{ matrix.target }}
+        run: |
+          case "${{ matrix.target }}" in
+            darwin_arm64|iossimulator_arm64) run=1 ;;
+            darwin_amd64) run=auto ;;
+            *) run=0 ;;
+          esac
+          make smoke-shared TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK" SMOKE_RUN=$run
 
       # Desktop only: purego dlopens this, and the mobile targets configure
       # FFmpeg with --disable-avdevice and have no purego consumer.
@@ -262,7 +282,10 @@ jobs:
         if: matrix.target == 'windows_arm64'
         run: |
           ASSET="llvm-mingw-$LLVM_MINGW_TAG-ucrt-ubuntu-22.04-x86_64.tar.xz"
-          curl -fsSL -o "$RUNNER_TEMP/$ASSET" \
+          # GitHub's release download answers 504 now and then (twice in a row
+          # on run 42567042426), and one miss fails the leg. The digest check
+          # below still catches a bad asset.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 -o "$RUNNER_TEMP/$ASSET" \
             "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_TAG/$ASSET"
           echo "$LLVM_MINGW_LINUX_SHA256  $RUNNER_TEMP/$ASSET" | sha256sum -c -
           sudo mkdir -p /opt/llvm-mingw
@@ -276,6 +299,16 @@ jobs:
 
       - name: Build ${{ matrix.target }}
         run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
+
+      # The shared libraries, as in the apple-android job. On Windows,
+      # check-shared also refuses a DLL that imports one Windows does not ship.
+      - name: Shared libraries ${{ matrix.target }}
+        run: make dist-shared TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
+
+      # Runs on linux_amd64, this runner's own platform. The Windows DLLs only
+      # link here; windows-test runs them on Windows.
+      - name: Smoke-test the shared libraries ${{ matrix.target }}
+        run: make smoke-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw SMOKE_RUN=${{ matrix.target == 'linux_amd64' && '1' || '0' }}
 
       # Every target on this runner is a desktop one, so all three get a shared
       # bridge: the Windows legs test against it on a real Windows runner, and
@@ -407,10 +440,13 @@ jobs:
             runner: windows-2025
             # mingw-w64 from the image (runner-images Install-Mingw64.ps1).
             cc: C:\mingw64\bin\gcc.exe
+            # The same compiler, spelled for Git Bash.
+            smoke_cc: C:/mingw64/bin/gcc.exe
           - target: windows_arm64
             runner: windows-11-arm
             # Installed by the llvm-mingw step below.
             cc: C:\llvm-mingw\bin\clang.exe
+            smoke_cc: C:/llvm-mingw/bin/clang.exe
     env:
       LIBS_MOD: github.com/belluikit/goffmpeg-libs/${{ matrix.target }}
     steps:
@@ -428,7 +464,8 @@ jobs:
         run: |
           $asset = "llvm-mingw-$env:LLVM_MINGW_TAG-ucrt-aarch64"
           $zip = Join-Path $env:RUNNER_TEMP "$asset.zip"
-          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$asset.zip" -OutFile $zip
+          # Retries for the same intermittent 504 as the Linux download.
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$asset.zip" -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
           $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
           if ($hash -ne $env:LLVM_MINGW_WINARM_SHA256) { throw "llvm-mingw digest mismatch: $hash" }
           Expand-Archive -Path $zip -DestinationPath C:\
@@ -468,6 +505,22 @@ jobs:
           $dst = "internal\libav\dist\${{ matrix.target }}\lib"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
           Copy-Item $dll $dst
+
+      # The shared FFmpeg DLLs, cross-built on Linux, run on Windows: they
+      # load, find each other beside the executable, and decode a file. Only
+      # when the matrix ran, since the published modules carry no shared/
+      # until goffmpeg-libs#14 is released.
+      - name: Smoke-test the shared libraries
+        if: needs.linux-windows.result == 'success'
+        shell: bash
+        env:
+          SMOKE_CC: ${{ matrix.smoke_cc }}
+          SMOKE_RUN: "1"
+          INCLUDE: internal/libav/include
+        run: |
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          sh scripts/smoke-shared.sh ${{ matrix.target }} "$tmp/libs/${{ matrix.target }}/shared" \
+            "$tmp/smoke" "$PWD/testdata/sample.mp4"
 
       - name: Test (cgo)
         shell: cmd
@@ -509,6 +562,12 @@ jobs:
 
       - name: Build linux_arm64
         run: make dist TARGET=linux_arm64 NPROC="$(nproc)"
+
+      - name: Shared libraries
+        run: make dist-shared TARGET=linux_arm64 NPROC="$(nproc)"
+
+      - name: Smoke-test the shared libraries
+        run: make smoke-shared TARGET=linux_arm64 SMOKE_RUN=1
 
       # Native platform: build the shared bridge and exercise both backends.
       # The hosted runner has no v4l2 device, so the capture tests skip here;
