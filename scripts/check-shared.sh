@@ -5,8 +5,9 @@
 # loader will see it. For every library: it is there, its own name (install
 # name, soname, DLL name) is its file name, and everything it links is either
 # beside it or part of the OS. Android adds no text relocations and 16KB
-# alignment; Apple adds a valid signature. Prints one line per library read,
-# and fails on an empty read rather than passing it.
+# alignment; Apple adds a valid signature; Linux adds no glibc symbol newer
+# than GLIBC_FLOOR (check-glibc.sh). Prints one line per library read, and
+# fails on an empty read rather than passing it.
 set -eu
 
 target=$1 dir=$2
@@ -138,5 +139,13 @@ for l in $libs; do
 done
 
 [ "$checked" -gt 0 ] || err "checked no libraries in $dir"
+
+# Linux: no library may need a glibc newer than the supported floor (#44).
+case $target in
+linux_*)
+	OBJDUMP="$OBJDUMP" sh "$(dirname "$0")/check-glibc.sh" "${GLIBC_FLOOR:?GLIBC_FLOOR is not set}" "$dir"/lib*-goffmpeg.so.* || fail=1
+	;;
+esac
+
 [ "$fail" -eq 0 ] || exit 1
 echo "==> $target: $checked shared libraries check out"

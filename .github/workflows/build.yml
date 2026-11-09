@@ -345,17 +345,27 @@ jobs:
       # The shared libraries, as in the apple-android job. On Windows,
       # check-shared also refuses a DLL that imports one Windows does not ship.
       - name: Build ${{ matrix.target }}
+        if: matrix.target != 'linux_amd64'
         run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
 
-      # Runs on linux_amd64, this runner's own platform. The Windows DLLs only
-      # link here; windows-test runs them on Windows.
-      - name: Smoke-test the shared libraries ${{ matrix.target }}
-        run: make smoke-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw SMOKE_RUN=${{ matrix.target == 'linux_amd64' && '1' || '0' }}
+      # Linux is built on Ubuntu 22.04, whose glibc 2.35 is the oldest goffmpeg
+      # supports (#44): a shared library needs at least the glibc it was built
+      # against, and this runner's Ubuntu 24.04 has 2.39. check-shared and
+      # bridge-shared fail a file that needs more than the floor. The smoke
+      # test runs there too, so the libraries are shown to load on the floor.
+      - name: Build ${{ matrix.target }} on Ubuntu 22.04
+        if: matrix.target == 'linux_amd64'
+        run: make linux-docker TARGET=linux_amd64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
 
-      # Every target on this runner is a desktop one, so all three get a shared
-      # bridge: the Windows legs test against it on a real Windows runner, and
-      # linux_amd64 ships it to purego consumers like the rest.
+      # The Windows DLLs only link here; windows-test runs them on Windows.
+      - name: Smoke-test the shared libraries ${{ matrix.target }}
+        if: startsWith(matrix.target, 'windows_')
+        run: make smoke-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw SMOKE_RUN=0
+
+      # The Windows legs test this bridge on a real Windows runner. Linux's was
+      # built on Ubuntu 22.04 above.
       - name: Shared bridge ${{ matrix.target }}
+        if: startsWith(matrix.target, 'windows_')
         run: make bridge-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw
 
       # purego dlopens the bridge on machines that have nothing but Windows, so
@@ -434,7 +444,10 @@ jobs:
       # reached the test binary, so the suite passed while testing a different
       # library, and the wrong conclusion survived two rounds of investigation
       # before anyone looked at where the linker was actually pointing.
-      - name: Test ${{ matrix.target }}
+      #
+      # The suite runs on Ubuntu 22.04, the oldest glibc goffmpeg supports (#44),
+      # so it shows the libraries link and load there.
+      - name: Test ${{ matrix.target }} on Ubuntu 22.04
         if: matrix.target == 'linux_amd64'
         run: |
           go mod edit -replace \
@@ -442,9 +455,10 @@ jobs:
           # Prove it: the replace must resolve to the clone, not the cache.
           go list -m -f '{{.Path}} => {{with .Replace}}{{.Dir}}{{end}}' \
             github.com/belluikit/goffmpeg-libs/linux_amd64
-          go test -race -count=1 ./...
-          go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
-          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|TestLinksSharedFFmpeg' .
+          scripts/linux-floor.sh '
+            go test -race -count=1 ./...
+            go test -count=1 -v -run "TestLinksSharedFFmpeg|TestVideoImportsSwscale" .
+            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|TestLinksSharedFFmpeg" .'
 
       - name: Restore go.mod
         if: always() && matrix.target == 'linux_amd64'
@@ -622,28 +636,20 @@ jobs:
         with:
           go-version: stable
 
-      - name: Install build tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            build-essential pkg-config libssl-dev patch
-
       - name: Fetch FFmpeg
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
 
-      - name: Build linux_arm64
-        run: make dist TARGET=linux_arm64 NPROC="$(nproc)"
-
-      - name: Smoke-test the shared libraries
-        run: make smoke-shared TARGET=linux_arm64 SMOKE_RUN=1
-
-      # Native platform: build the shared bridge and exercise both backends.
+      # Built on Ubuntu 22.04, whose glibc 2.35 is the oldest goffmpeg supports
+      # (#44): a shared library needs at least the glibc it was built against,
+      # and this runner's Ubuntu 24.04 has 2.39. check-shared and bridge-shared
+      # fail a file that needs more. The smoke test and the shared bridge are
+      # built there too; the tests below then exercise both backends.
       # The hosted runner has no v4l2 device, so the capture tests skip here;
       # the reopen test below says so in the log rather than passing silently.
-      - name: Shared bridge
-        run: make bridge-shared TARGET=linux_arm64
+      - name: Build linux_arm64 on Ubuntu 22.04
+        run: make linux-docker TARGET=linux_arm64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
 
       # Without this the tests below link the *published* companion module, not
       # the FFmpeg this job just built — libav_linux_arm64.go blank-imports
@@ -680,17 +686,20 @@ jobs:
       # about #14. It skipping silently while everyone reads the green tick as
       # proof of the fix is how #14 nearly got closed on a run that never
       # touched a device.
+      #
+      # These run on Ubuntu 22.04, the glibc floor (scripts/linux-floor.sh).
       - name: Test v4l2 reopen (#14)
-        run: go test -count=1 -v -run TestOpenDeviceV4L2Reopen .
+        run: scripts/linux-floor.sh 'go test -count=1 -v -run TestOpenDeviceV4L2Reopen .'
 
       - name: Test (cgo)
         run: |
-          go test -race -count=1 ./...
-          go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
-          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|TestLinksSharedFFmpeg' .
+          scripts/linux-floor.sh '
+            go test -race -count=1 ./...
+            go test -count=1 -v -run "TestLinksSharedFFmpeg|TestVideoImportsSwscale" .
+            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|TestLinksSharedFFmpeg" .'
 
       - name: Test (purego)
-        run: CGO_ENABLED=0 go test -count=1 ./...
+        run: scripts/linux-floor.sh 'CGO_ENABLED=0 go test -count=1 ./...'
 
       # Leave the checkout as it was found; the replace is for this job only.
       - name: Restore go.mod
