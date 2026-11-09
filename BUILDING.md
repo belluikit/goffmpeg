@@ -56,6 +56,61 @@ and bump the requirement in this module's `go.mod`:
 cd ../goffmpeg-libs && git tag linux_amd64/v0.2.0 && git push origin --tags
 ```
 
+## Shared libraries
+
+Apps built on Player ship FFmpeg as shared libraries, so a user can replace
+them (LGPL 2.1 §6b; Player ADR-0037 D3, goffmpeg-libs#14). `make dist-shared`
+builds them beside the static libraries, into `dist/<target>/shared`, and
+`sync-libs` copies that directory into the companion module as `shared/`:
+
+```sh
+make dist TARGET=linux_amd64 && make dist-shared TARGET=linux_amd64
+make smoke-shared TARGET=linux_amd64  # decode a file through them
+make sync-libs TARGET=linux_amd64
+```
+
+It is a configure of its own, the static line with `--enable-shared
+--disable-static` and the flags below. FFmpeg will not build both kinds at once
+for Windows ("Cannot build both shared and static libs when using dllimport"),
+and one configure line per artifact is what each `NOTICE` records.
+
+Every name carries the suffix `-goffmpeg` (`--build-suffix`), so it cannot be
+mistaken for another FFmpeg in the same process or package: a distro
+`libavcodec.so.62`, an `avcodec-62.dll` another component loaded, another SDK's
+`libavcodec.so` in an APK. FFmpeg's checklist (ffmpeg.org/legal.html) allows
+it: "Do not rename FFmpeg dlls to some obfuscated name, but adding a suffix or
+prefix is fine".
+
+| Target | Files in `shared/` | How a consumer finds them |
+|---|---|---|
+| `darwin_*` | `libavcodec-goffmpeg.63.dylib`, install name `@rpath/libavcodec-goffmpeg.63.dylib` | the executable's rpath |
+| `ios_arm64`, `iossimulator_arm64` | `libavcodec-goffmpeg.framework`, install name `@rpath/libavcodec-goffmpeg.framework/libavcodec-goffmpeg`, `Info.plist`, ad-hoc signed | `@executable_path/Frameworks`, where the app embeds and re-signs them |
+| `linux_*` | `libavcodec-goffmpeg.so.63`, soname the same | the executable's rpath |
+| `android_*` | `libavcodec-goffmpeg.so`, soname the same, 16KB-aligned | the APK's `lib/<abi>/` |
+| `windows_*` | `avcodec-goffmpeg-63.dll` and its import library `libavcodec-goffmpeg.dll.a` | the executable's directory |
+
+The same goes for avutil, swresample, swscale, avformat and (desktop only)
+avdevice. Each file is named the way its loader looks for it, and only that
+name is kept. FFmpeg installs the other names as symlinks, and a Go module zip
+leaves symlinks out. Android's soname has no version because an APK installs
+only `lib*.so`.
+
+The libraries carry no rpath of their own: whatever loads them supplies it.
+`shared/` is a directory of its own, not `lib/`, for the same reason it is a
+separate configure: the cgo directives link `-L${SRCDIR}/lib -lavcodec`, and a
+linker that found a shared library there would prefer it to the static one.
+
+`dist-shared` ends with `make check-shared`, which reads every library the way
+its loader will. It checks that the library's own name is its file name, and
+that everything it links is beside it or part of the OS. On Android it also
+refuses text relocations and 4KB alignment, on Apple a signature that does not
+verify, and on Windows a DLL import Windows does not ship. `make smoke-shared`
+links `testdata/sharedsmoke/smoke.c` against the shared libraries alone and,
+where the machine can run the target, decodes `testdata/sample.mp4` with it.
+CI runs it on macOS (arm64 natively, x86_64 under Rosetta), the iOS simulator,
+both Linux targets and both Windows targets; the iOS device and Android slices
+only link.
+
 ## Releasing after a bridge change
 
 **Any change to `bridge.c` or `bridge.h` needs a companion release, not just a
@@ -80,7 +135,7 @@ gh workflow run build.yml            # or push a change to bridge.c
 gh run download <run-id>             # libav-<target> for each target
 ```
 
-For each target, drop the downloaded `lib/` into the companion checkout, then
+For each target, drop the downloaded `lib/` and `shared/` into the companion checkout, then
 tag. The tags are per-module and must all move together — a mixed set means one
 platform loads a library built from different sources than the rest:
 
