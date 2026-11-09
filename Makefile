@@ -246,8 +246,9 @@ print-config: check-src
 	@echo "DIST_DIR    = $(DIST_DIR)"
 	@echo "FFMPEG_CONF = $(FFMPEG_CONF)"
 
-# dist builds the static libraries for TARGET. Static is what the cgo build
-# links against; the shared bridge below exists only for the purego backend.
+# dist builds the static libraries for TARGET. Nothing links them any more:
+# the cgo build and the purego bridge load the shared ones (#40). They are
+# still built and published, and check-paths reads them.
 dist: check-src patch-src
 	@mkdir -p "$(BUILD_DIR)"
 	cd "$(BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) --enable-static --disable-shared
@@ -370,10 +371,14 @@ endif
 ifeq ($(TARGET),darwin_amd64)
 	BRIDGE_CC = clang -arch x86_64
 endif
+# The bridge loads FFmpeg as shared libraries, like the cgo build (player
+# ADR-0037 D3, #40), so these are only what bridge.c itself needs. It finds
+# FFmpeg beside itself, in a package, or in ../shared, in this checkout's
+# dist/<target> and in a goffmpeg-libs module. Windows has no rpath: the DLLs
+# must be beside the executable or on PATH.
+BRIDGE_FFMPEG = $(addprefix $(SHARED_DIR)/,$(shell scripts/shared-libs.sh $(TARGET) "$(SHARED_DIR)" | awk '{print $$2}'))
 ifneq ($(filter darwin_%,$(TARGET)),)
-	BRIDGE_SYSLIBS = -framework AVFoundation -framework CoreMedia -framework CoreVideo \
-		-framework CoreFoundation -framework Foundation -framework CoreGraphics \
-		-framework VideoToolbox -framework Security
+	BRIDGE_SYSLIBS = -framework AVFoundation -framework CoreMedia -framework Foundation
 	# The AVFoundation capture-mode query is Objective-C and so cannot live in
 	# bridge.c. cgo picks it up from the package directory on its own; this
 	# shared-library link is the path that has to be told, and omitting it
@@ -382,17 +387,14 @@ ifneq ($(filter darwin_%,$(TARGET)),)
 	# The linker records the output path as the dylib's install name, which
 	# put the CI runner's checkout path into the published library. purego
 	# opens it by file path, so the install name is never used to find it.
-	BRIDGE_LDFLAGS = -install_name @rpath/libgoffmpeg.dylib
+	BRIDGE_LDFLAGS = -install_name @rpath/libgoffmpeg.dylib \
+		-Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../shared
 endif
 ifneq ($(filter linux_%,$(TARGET)),)
-	# -Bsymbolic binds the FFmpeg symbols inside this object rather than
-	# leaving them interposable. Without it the link fails on both x86_64 and
-	# aarch64: the hand-written assembly addresses global tables with
-	# page-relative relocations, which are only valid when the symbol cannot
-	# be replaced at load time ("may bind externally ... recompile with -fPIC",
-	# which is a misleading message — the objects are already PIC).
-	BRIDGE_LDFLAGS = -Wl,-Bsymbolic
-	BRIDGE_SYSLIBS = -lssl -lcrypto -lpthread -lm
+	# By soname with -l:, as the cgo link does (scripts/gen-libav.sh).
+	BRIDGE_FFMPEG = -L"$(SHARED_DIR)" $(addprefix -l:,$(notdir $(shell scripts/shared-libs.sh $(TARGET) "$(SHARED_DIR)" | awk '{print $$2}')))
+	BRIDGE_LDFLAGS = -Wl,-rpath,'$$ORIGIN:$$ORIGIN/../shared'
+	BRIDGE_SYSLIBS = -lpthread -lm
 endif
 ifeq ($(TARGET),windows_amd64)
 	BRIDGE_CC = x86_64-w64-mingw32-gcc
@@ -415,20 +417,22 @@ WIN_SYSLIBS = -lsecur32 -lbcrypt -lws2_32 -lole32 -loleaut32 -lstrmiids -luuid \
 	-lgdi32 -lavicap32 -lvfw32 -luser32 -lshlwapi -lcrypt32 -lncrypt -lmfplat -lmfuuid
 
 # Companion modules under github.com/belluikit/goffmpeg-libs distribute the
-# static libraries, one module per platform, so a consumer downloads only their
-# own target rather than every one. sync-libs copies a freshly built target
-# into a sibling checkout of that repository.
+# libraries, one module per platform, so a consumer downloads only their own
+# target rather than every one. sync-libs copies a freshly built target into a
+# sibling checkout of that repository, and writes the module's cgo link files
+# from the shared libraries it copied (scripts/gen-libav.sh): the versions in
+# their names come from the files, so an FFmpeg bump needs no hand edit.
 LIBS_REPO ?= $(ROOT)/../goffmpeg-libs
 
 sync-libs: check-paths
 	@test -d "$(DIST_DIR)/lib" || { echo "no build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
+	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
 	@mkdir -p "$(LIBS_REPO)/$(TARGET)/lib"
 	cp "$(DIST_DIR)"/lib/*.a "$(LIBS_REPO)/$(TARGET)/lib/"
 	@cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" 2>/dev/null && \
 		echo "    (including the purego shared bridge)" || true
-	@if [ -d "$(SHARED_DIR)" ]; then \
-		rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared" && \
-		echo "    (including the shared FFmpeg libraries)"; fi
+	rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared"
+	scripts/gen-libav.sh $(TARGET) "$(LIBS_REPO)/$(TARGET)"
 	@echo "==> $(TARGET) libraries synced to $(LIBS_REPO)/$(TARGET)"
 
 # check-paths refuses a build whose libraries name a personal home directory.
@@ -459,21 +463,21 @@ sync-headers:
 	cp -R "$(DIST_DIR)/include" "$(ROOT)/internal/libav/include"
 	@echo "==> headers refreshed from $(TARGET)"
 
-# The purego backend dlopens this. It embeds the static FFmpeg libraries, so the
-# result is one self-contained shared object per target.
+# The purego backend dlopens this. It loads FFmpeg as shared libraries, the
+# ones dist-shared builds, so a package carries libgoffmpeg beside them (#40).
 #
-# Deliberately not dependent on `dist`: the libraries are usually already built
-# (or synced from a companion module), and re-running configure+make to produce
-# a 35KB wrapper wastes minutes.
+# Deliberately not dependent on `dist-shared`: the libraries are usually
+# already built (or synced from a companion module), and re-running
+# configure+make to produce a 35KB wrapper wastes minutes.
 bridge-shared:
-	@test -d "$(DIST_DIR)/lib" || { \
-		echo "no libraries for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
+	@test -d "$(SHARED_DIR)" || { \
+		echo "no shared libraries for $(TARGET) — run: make dist-shared TARGET=$(TARGET)"; exit 1; }
+	@mkdir -p "$(DIST_DIR)/lib"
 	$(BRIDGE_CC) -shared -fPIC $(BRIDGE_LDFLAGS) \
 		-o "$(DIST_DIR)/lib/libgoffmpeg.$(LIB_EXT)" \
 		bridge.c $(BRIDGE_EXTRA_SRC) \
-		-I"$(ROOT)/internal/libav/include" -L"$(DIST_DIR)/lib" \
-		-lavdevice -lavformat -lavcodec -lswscale -lswresample -lavutil -lm \
-		$(BRIDGE_SYSLIBS)
+		-I"$(ROOT)/internal/libav/include" \
+		$(BRIDGE_FFMPEG) $(BRIDGE_SYSLIBS)
 	@echo "==> $(TARGET) shared bridge at $(DIST_DIR)/lib/libgoffmpeg.$(LIB_EXT)"
 
 test: test-cgo

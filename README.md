@@ -161,9 +161,9 @@ headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
 
 ## Backends
 
-- **cgo** (default, `CGO_ENABLED=1`): links FFmpeg's static libraries and
-  compiles the C bridge from source. This is the supported path, and the only
-  one with `OpenReader`.
+- **cgo** (default, `CGO_ENABLED=1`): compiles the C bridge from source and
+  loads FFmpeg's shared libraries from the goffmpeg-libs module. This is the
+  supported path, and the only one with `OpenReader`.
 - **purego** (`CGO_ENABLED=0`): loads the shared library `libgoffmpeg`
   (`.dylib`, `.so` or `.dll`) at startup. The desktop goffmpeg-libs modules
   ship it under `<target>/lib/`, but this backend does not import those
@@ -174,12 +174,16 @@ headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
   `ErrOpenOptionsUnavailable`, `ErrDeviceListUnavailable` or
   `ErrDeviceModesUnavailable` instead of crashing.
 
+Either way FFmpeg is loaded as shared libraries, so that a user can replace
+them (LGPL 2.1 §6b). An app ships them beside its binary. `go run` and `go
+test` find them in the module cache on macOS and Linux; on Windows, put the
+module's `shared/` on `PATH` first. See [BUILDING.md](BUILDING.md#linking).
+
 ## Audio only
 
 `-tags goffmpeg_novideo` builds the cgo backend for audio alone. The bridge opens
-no video stream and never calls libswscale, so a static link takes nothing of
-it: on android/arm64 a stripped binary is 1.2 MB smaller (goffmpeg-libs
-v0.3.5). A file with video still opens and plays its audio. No video frame
+no video stream and never calls libswscale, and the binary doesn't load it, so
+an app ships without it (about 1.2 MB on android/arm64). A file with video still opens and plays its audio. No video frame
 arrives, `VideoInfo` reports no size, and `GetRGBA` returns `ErrVideoNotBuilt`.
 Camera capture needs video, so leave the tag off for it. The tag doesn't change
 the purego backend, which loads a prebuilt `libgoffmpeg` that has video.

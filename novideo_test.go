@@ -54,3 +54,16 @@ func TestNoVideoLinksNoSwscale(t *testing.T) {
 		}
 	}
 }
+
+// With FFmpeg linked dynamically, no symbol is not enough: a library linked by
+// path is imported even when nothing calls it, and a package without
+// libswscale would then not load (#40). The audio-only build must not import it.
+func TestNoVideoImportsNoSwscale(t *testing.T) {
+	got := requireSharedFFmpeg(t)
+	if !got["avcodec"] {
+		t.Fatal("libavcodec-goffmpeg isn't imported: the read found no FFmpeg")
+	}
+	if got["swscale"] {
+		t.Error("an audio-only build imports libswscale-goffmpeg")
+	}
+}
