@@ -272,6 +272,10 @@ var ErrDeviceListNoDevices = errors.New("goffmpeg: no capture devices could be e
 // waiting for a frame, so a bare `continue` busy-waits a core between frames.
 var ErrAgain = errors.New("goffmpeg: no data available yet")
 
+// ErrVideoNotBuilt is GetRGBA's answer in a build with the goffmpeg_novideo
+// tag, which decodes audio only: no video frame ever arrives there.
+var ErrVideoNotBuilt = errors.New("goffmpeg: built without video (the goffmpeg_novideo tag)")
+
 // AVError is an FFmpeg AVERROR code reported by the decoder.
 //
 // It exists so a caller can classify a failure without parsing a formatted
