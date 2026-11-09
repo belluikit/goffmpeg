@@ -120,6 +120,13 @@ endif
 # --- Linux ------------------------------------------------------------------
 # Built inside a container (see linux-docker) so the host needs no cross
 # toolchain; these branches are what runs *inside* it, natively.
+#
+# The container also sets the oldest glibc goffmpeg supports (#44): a shared
+# library needs at least the glibc it was built against, so the libraries are
+# built on Debian 12, whose glibc is the floor. check-shared and bridge-shared
+# fail a Linux file that needs a newer one, which is what a build on a newer
+# host produces.
+GLIBC_FLOOR := 2.36
 ifeq ($(TARGET),linux_amd64)
 	TARGET_CONF = --arch=x86_64 --target-os=linux --enable-openssl --enable-avdevice --enable-indev=v4l2
 	LIB_EXT = so
@@ -267,7 +274,7 @@ dist: check-src patch-src
 # the libraries are named.
 check-shared:
 	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
-	READELF="$(SHARED_READELF)" OBJDUMP="$(SHARED_OBJDUMP)" IOS_MIN="$(IOS_MIN)" \
+	READELF="$(SHARED_READELF)" OBJDUMP="$(SHARED_OBJDUMP)" IOS_MIN="$(IOS_MIN)" GLIBC_FLOOR="$(GLIBC_FLOOR)" \
 		scripts/check-shared.sh "$(TARGET)" "$(SHARED_DIR)"
 
 # Tools check-shared reads the binaries with, by target rather than by host.
@@ -341,13 +348,20 @@ dist-all:
 # (arm64 hosts emulate amd64 through qemu and vice versa). DOCKER_GOALS picks
 # what it builds, e.g. DOCKER_GOALS="dist smoke-shared".
 DOCKER_GOALS ?= dist
+# The image's glibc is GLIBC_FLOOR: Debian 12 ships 2.36. The build runs as
+# root, so what it wrote for TARGET is handed back to the caller at the end.
+# Best effort: a chown the host's file sharing refuses must not fail a build
+# that succeeded.
+LINUX_IMAGE := debian:bookworm-slim
 linux-docker: check-src
 	docker run --rm --platform linux/$(subst linux_,,$(TARGET)) \
 		-v "$(ROOT)":/work -v "$(FFMPEG_SRC)":/ffmpeg -w /work \
-		debian:bookworm-slim bash -c '\
+		$(LINUX_IMAGE) bash -c '\
 			set -e; \
 			apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 				build-essential yasm nasm pkg-config libssl-dev make patch >/dev/null; \
+			trap "chown -R $(shell id -u):$(shell id -g) /work/internal/libav/dist/$(TARGET) /work/internal/libav/build/$(TARGET)-* 2>/dev/null || true" EXIT; \
+			ldd --version | head -n 1; \
 			make $(DOCKER_GOALS) TARGET=$(TARGET) FFMPEG_SRC=/ffmpeg NPROC=$$(nproc)'
 
 # Toolchain and system libraries for the shared bridge, selected by TARGET
@@ -466,6 +480,8 @@ bridge-shared:
 		bridge.c $(BRIDGE_EXTRA_SRC) \
 		-I"$(ROOT)/internal/libav/include" \
 		$(BRIDGE_FFMPEG) $(BRIDGE_SYSLIBS)
+	@if [ -n "$(filter linux_%,$(TARGET))" ]; then \
+		scripts/check-glibc.sh $(GLIBC_FLOOR) "$(DIST_DIR)/lib/libgoffmpeg.so"; fi
 	@echo "==> $(TARGET) shared bridge at $(DIST_DIR)/lib/libgoffmpeg.$(LIB_EXT)"
 
 test: test-cgo
