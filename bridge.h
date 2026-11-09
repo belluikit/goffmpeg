@@ -162,6 +162,9 @@ int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=trunc
 int decoder_get_rgba(Decoder *d, uint8_t *buffer);
 int decoder_get_audio(Decoder *d, uint8_t **buffer);
 void decoder_close(Decoder *d);
+// FFmpeg's av_log_set_level and av_log_get_level, for the purego backend.
+void decoder_log_set_level(int level);
+int decoder_log_get_level(void);
 
 // Device enumeration.
 //

@@ -131,10 +131,18 @@ func init() {
 	purego.RegisterLibFunc(&decoder_seek, lib, "decoder_seek")
 	purego.RegisterLibFunc(&decoder_set_audio_channels, lib, "decoder_set_audio_channels")
 
-	// FFmpeg's own symbol, exported because libgoffmpeg links libavutil in.
-	// Probed like the bridge's later additions, then applied at once: the
-	// package's default level is LogError (see SetLogLevel, #19).
-	if hasSymbol(lib, "av_log_set_level") && hasSymbol(lib, "av_log_get_level") {
+	// FFmpeg's log level, applied at once: the package's default level is
+	// LogError (see SetLogLevel, #19). The bridge exports it as
+	// decoder_log_*, because a libgoffmpeg that loads FFmpeg as shared
+	// libraries does not export av_log_* on Windows (#40). A libgoffmpeg with
+	// FFmpeg linked in, from before that, exports FFmpeg's own symbol instead.
+	// Probed like the bridge's later additions.
+	switch {
+	case hasSymbol(lib, "decoder_log_set_level") && hasSymbol(lib, "decoder_log_get_level"):
+		purego.RegisterLibFunc(&av_log_set_level, lib, "decoder_log_set_level")
+		purego.RegisterLibFunc(&av_log_get_level, lib, "decoder_log_get_level")
+		_ = setLogLevel(LogError)
+	case hasSymbol(lib, "av_log_set_level") && hasSymbol(lib, "av_log_get_level"):
 		purego.RegisterLibFunc(&av_log_set_level, lib, "av_log_set_level")
 		purego.RegisterLibFunc(&av_log_get_level, lib, "av_log_get_level")
 		_ = setLogLevel(LogError)
@@ -197,8 +205,8 @@ func init() {
 	purego.RegisterLibFunc(&device_modes_free, lib, "device_modes_free")
 }
 
-// av_log_set_level and av_log_get_level are nil against a library that does
-// not export them.
+// av_log_set_level and av_log_get_level are nil against a library that
+// exports neither the bridge's decoder_log_* nor FFmpeg's av_log_*.
 var (
 	av_log_set_level func(level int32)
 	av_log_get_level func() int32

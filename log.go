@@ -15,7 +15,8 @@ const (
 )
 
 // ErrLogLevelUnavailable reports SetLogLevel against a shared libgoffmpeg that
-// does not export av_log_set_level (the purego backend only).
+// exports neither decoder_log_set_level nor av_log_set_level (the purego
+// backend only).
 var ErrLogLevelUnavailable = errors.New("goffmpeg: the loaded libgoffmpeg cannot set FFmpeg's log level")
 
 // SetLogLevel sets how much of FFmpeg's logging is printed to stderr.

@@ -1,6 +1,7 @@
 #include "bridge.h"
 #include <libavutil/mem.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/log.h>
 
 // find_video_stream is av_find_best_stream for video, minus attached pictures.
 // The cover art an MP3, M4A or FLAC embeds is a one-packet video stream, and
@@ -405,6 +406,14 @@ int decoder_get_audio(Decoder *d, uint8_t **buffer) {
     // stereo, which would have truncated every multichannel buffer.
     return ret * d->channels * 2;
 }
+
+// FFmpeg's log level, exported by the bridge itself for the purego backend,
+// which looks every symbol up in libgoffmpeg's handle. With FFmpeg linked in,
+// av_log_set_level was among the bridge's own exports. Linked as a shared
+// library it is an import, and Windows' GetProcAddress searches only what the
+// DLL itself exports (#40).
+void decoder_log_set_level(int level) { av_log_set_level(level); }
+int decoder_log_get_level(void) { return av_log_get_level(); }
 
 void decoder_close(Decoder *d) {
 #ifndef GOFFMPEG_NO_VIDEO
