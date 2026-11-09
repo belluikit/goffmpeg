@@ -208,25 +208,25 @@ that were skipping on `Err*Unavailable` should start running.
 | `android_arm64` | Android NDK r26+ | MediaCodec via JNI, no TLS |
 | `android_arm` | Android NDK r26+ | armeabi-v7a, no TLS |
 | `android_amd64` | Android NDK r26+ | Emulator, no TLS |
-| `linux_amd64` | Docker (`make linux-docker`) | OpenSSL for https, v4l2 capture; glibc 2.36 and up |
-| `linux_arm64` | Docker (`make linux-docker`) | OpenSSL for https, v4l2 capture; glibc 2.36 and up |
+| `linux_amd64` | Docker (`make linux-docker`) | OpenSSL for https, v4l2 capture; glibc 2.35 and up |
+| `linux_arm64` | Docker (`make linux-docker`) | OpenSSL for https, v4l2 capture; glibc 2.35 and up |
 | `windows_amd64` | mingw-w64 | Schannel for TLS, dshow capture |
 | `windows_arm64` | llvm-mingw | Schannel for TLS, dshow capture; distro mingw-w64 is x86 only |
 
 Build the Linux targets with `make linux-docker`, which runs the build in a
-Debian 12 container:
+Ubuntu 22.04 container:
 
 ```sh
 make linux-docker TARGET=linux_arm64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
 ```
 
-The container sets the oldest glibc goffmpeg supports: **2.36** (Debian 12,
-Ubuntu 23.04 and later; #44). A shared library records the glibc symbol
+The container sets the oldest glibc goffmpeg supports: **2.35** (Ubuntu 22.04
+LTS, Debian 12 and later; #44). A shared library records the glibc symbol
 versions it was linked against, so it needs at least the glibc it was built
 with, whatever the system it runs on has. A build on the host's own, newer
 glibc would raise the floor without anyone choosing to. `check-shared` and
 `bridge-shared` fail a Linux file that needs more than `GLIBC_FLOOR`
-(`scripts/check-glibc.sh`), and CI runs goffmpeg's Linux tests on Debian 12
+(`scripts/check-glibc.sh`), and CI runs goffmpeg's Linux tests on Ubuntu 22.04
 (`scripts/linux-floor.sh`).
 
 ### The iOS simulator

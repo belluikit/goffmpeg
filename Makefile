@@ -123,10 +123,10 @@ endif
 #
 # The container also sets the oldest glibc goffmpeg supports (#44): a shared
 # library needs at least the glibc it was built against, so the libraries are
-# built on Debian 12, whose glibc is the floor. check-shared and bridge-shared
+# built on Ubuntu 22.04, whose glibc is the floor. check-shared and bridge-shared
 # fail a Linux file that needs a newer one, which is what a build on a newer
 # host produces.
-GLIBC_FLOOR := 2.36
+GLIBC_FLOOR := 2.35
 ifeq ($(TARGET),linux_amd64)
 	TARGET_CONF = --arch=x86_64 --target-os=linux --enable-openssl --enable-avdevice --enable-indev=v4l2
 	LIB_EXT = so
@@ -348,11 +348,11 @@ dist-all:
 # (arm64 hosts emulate amd64 through qemu and vice versa). DOCKER_GOALS picks
 # what it builds, e.g. DOCKER_GOALS="dist smoke-shared".
 DOCKER_GOALS ?= dist
-# The image's glibc is GLIBC_FLOOR: Debian 12 ships 2.36. The build runs as
+# The image's glibc is GLIBC_FLOOR: Ubuntu 22.04 ships 2.35. The build runs as
 # root, so what it wrote for TARGET is handed back to the caller at the end.
 # Best effort: a chown the host's file sharing refuses must not fail a build
 # that succeeded.
-LINUX_IMAGE := debian:bookworm-slim
+LINUX_IMAGE := ubuntu:22.04
 linux-docker: check-src
 	docker run --rm --platform linux/$(subst linux_,,$(TARGET)) \
 		-v "$(ROOT)":/work -v "$(FFMPEG_SRC)":/ffmpeg -w /work \

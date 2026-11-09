@@ -349,12 +349,12 @@ jobs:
         if: matrix.target != 'linux_amd64'
         run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
 
-      # Linux is built on Debian 12, whose glibc 2.36 is the oldest goffmpeg
+      # Linux is built on Ubuntu 22.04, whose glibc 2.35 is the oldest goffmpeg
       # supports (#44): a shared library needs at least the glibc it was built
       # against, and this runner's Ubuntu 24.04 has 2.39. check-shared and
       # bridge-shared fail a file that needs more than the floor. The smoke
       # test runs there too, so the libraries are shown to load on the floor.
-      - name: Build ${{ matrix.target }} on Debian 12
+      - name: Build ${{ matrix.target }} on Ubuntu 22.04
         if: matrix.target == 'linux_amd64'
         run: make linux-docker TARGET=linux_amd64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
 
@@ -364,7 +364,7 @@ jobs:
         run: make smoke-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw SMOKE_RUN=0
 
       # The Windows legs test this bridge on a real Windows runner. Linux's was
-      # built on Debian 12 above.
+      # built on Ubuntu 22.04 above.
       - name: Shared bridge ${{ matrix.target }}
         if: startsWith(matrix.target, 'windows_')
         run: make bridge-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw
@@ -446,9 +446,9 @@ jobs:
       # library, and the wrong conclusion survived two rounds of investigation
       # before anyone looked at where the linker was actually pointing.
       #
-      # The suite runs on Debian 12, the oldest glibc goffmpeg supports (#44),
+      # The suite runs on Ubuntu 22.04, the oldest glibc goffmpeg supports (#44),
       # so it shows the libraries link and load there.
-      - name: Test ${{ matrix.target }} on Debian 12
+      - name: Test ${{ matrix.target }} on Ubuntu 22.04
         if: matrix.target == 'linux_amd64'
         run: |
           go mod edit -replace \
@@ -647,14 +647,14 @@ jobs:
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
 
-      # Built on Debian 12, whose glibc 2.36 is the oldest goffmpeg supports
+      # Built on Ubuntu 22.04, whose glibc 2.35 is the oldest goffmpeg supports
       # (#44): a shared library needs at least the glibc it was built against,
       # and this runner's Ubuntu 24.04 has 2.39. check-shared and bridge-shared
       # fail a file that needs more. The smoke test and the shared bridge are
       # built there too; the tests below then exercise both backends.
       # The hosted runner has no v4l2 device, so the capture tests skip here;
       # the reopen test below says so in the log rather than passing silently.
-      - name: Build linux_arm64 on Debian 12
+      - name: Build linux_arm64 on Ubuntu 22.04
         run: make linux-docker TARGET=linux_arm64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
 
       # Without this the tests below link the *published* companion module, not
@@ -693,7 +693,7 @@ jobs:
       # proof of the fix is how #14 nearly got closed on a run that never
       # touched a device.
       #
-      # These run on Debian 12, the glibc floor (scripts/linux-floor.sh).
+      # These run on Ubuntu 22.04, the glibc floor (scripts/linux-floor.sh).
       - name: Test v4l2 reopen (#14)
         run: scripts/linux-floor.sh 'go test -count=1 -v -run TestOpenDeviceV4L2Reopen .'
 
