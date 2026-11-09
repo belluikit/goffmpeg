@@ -35,8 +35,9 @@ Needed when bumping FFmpeg or changing its configuration:
 ```sh
 git clone https://github.com/FFmpeg/FFmpeg.git ../ffmpeg
 git -C ../ffmpeg checkout --detach e2bc6d88cd68184288c16570e04881c3a426a05a
-make dist TARGET=linux_amd64        # build the shared libraries
-make sync-libs TARGET=linux_amd64   # copy into ../goffmpeg-libs, write its link files
+make dist TARGET=linux_amd64            # the media codec set, into shared/
+make dist TARGET=linux_amd64 SET=audio  # the audio codec set, into shared-audio/
+make sync-libs TARGET=linux_amd64       # copy both into ../goffmpeg-libs, write its link files
 ```
 
 `make dist` alone builds the host target; `make dist-all` builds everything this
@@ -64,12 +65,16 @@ cd ../goffmpeg-libs && git tag linux_amd64/v0.2.0 && git push origin --tags
 Apps built on Player ship FFmpeg as shared libraries, so a user can replace
 them (LGPL 2.1 §6b; Player ADR-0037 D3, goffmpeg-libs#14). They are the only
 FFmpeg goffmpeg builds: the static archives were last published in
-goffmpeg-libs v0.4.0 (#45). `make dist` builds them into `dist/<target>/shared`,
-and `sync-libs` copies that directory into the companion module as `shared/`:
+goffmpeg-libs v0.4.0 (#45). Each target is built twice, once per codec set
+([What is in the build](#what-is-in-the-build)): `make dist` builds the media
+set into `dist/<target>/shared`, `make dist SET=audio` the audio set into
+`dist/<target>/shared-audio`, and `sync-libs` copies both into the companion
+module under the same names:
 
 ```sh
-make dist TARGET=linux_amd64
-make smoke-shared TARGET=linux_amd64  # decode a file through them
+make dist TARGET=linux_amd64 && make dist TARGET=linux_amd64 SET=audio
+make smoke-shared TARGET=linux_amd64            # decode an MP4's video through the media set
+make smoke-shared TARGET=linux_amd64 SET=audio  # an MP3 through the audio set
 make sync-libs TARGET=linux_amd64
 ```
 
@@ -105,14 +110,19 @@ Both backends load these libraries (#40). A goffmpeg-libs module's `lib/`
 holds only the purego bridge, on desktop.
 
 `make sync-libs` writes each goffmpeg-libs module's link files from the files
-in its `shared/` (`scripts/gen-libav.sh`), so the version numbers in the names
-are never typed by hand and an FFmpeg bump needs no edit:
+in its `shared/` and `shared-audio/` (`scripts/gen-libav.sh`), so the version
+numbers in the names are never typed by hand and an FFmpeg bump needs no edit:
 
-- `libav.go` links every library but libswscale.
-- `libav_swscale.go` links libswscale, under `!goffmpeg_novideo`. An audio-only
-  build never calls it, and a linker records a library linked by path even when
-  nothing calls it, so a binary that still named it would not load from a
-  package without it.
+- `libav.go` links the media set from `shared/`, under `!goffmpeg_novideo`.
+- `libav_audio.go` links the audio set from `shared-audio/`, under
+  `goffmpeg_novideo`.
+
+A binary links exactly one set, so it lists only that set's libraries, and a
+package carries only those. A linker records a library linked by path even
+when nothing calls it, so a binary that named a library its package left out
+would not load: that is why the sets are linked whole, rather than libswscale
+being left out of one link. (goffmpeg-libs v0.4.0 and v0.5.0 had one set and
+a `libav_swscale.go` instead.)
 
 Each library is linked by file, because a Go module zip leaves out the
 `libavcodec.dylib`- or `libavcodec.so`-style symlinks that `-lavcodec` would
@@ -121,14 +131,15 @@ ending in `.so.63`.
 
 | Target | Running from source (`go run`, `go test`) | A packaged app |
 |---|---|---|
-| `darwin_*`, `linux_*` | an rpath to the module's `shared/`, in the module cache | the packager copies the libraries and replaces that rpath with its own (`@executable_path/../Frameworks`, `$ORIGIN`): the module's rpath names the build machine's module cache |
+| `darwin_*`, `linux_*` | an rpath to the module's `shared/` (`shared-audio/` with `goffmpeg_novideo`), in the module cache | the packager copies the libraries and replaces that rpath with its own (`@executable_path/../Frameworks`, `$ORIGIN`): the module's rpath names the build machine's module cache |
 | `ios_*` | not run | the app embeds the frameworks and links with `-Wl,-rpath,@executable_path/Frameworks`. cgo refuses an rpath that starts with `@`, so the module cannot supply it |
 | `android_*` | not run | the APK's `lib/<abi>/` |
 | `windows_*` | **`shared/` on `PATH`**, see below | the DLLs beside the executable |
 
 Windows has no rpath, so a binary that `go test` or `go run` builds in a
 temporary directory does not find the DLLs in the module cache. Put the
-module's `shared/` on `PATH` first:
+module's `shared/` on `PATH` first, or `shared-audio/` for a `goffmpeg_novideo`
+build (the two sets' DLLs are named apart, so both can be there at once):
 
 ```powershell
 $env:PATH = "$(go list -m -f '{{.Dir}}' github.com/belluikit/goffmpeg-libs/windows_amd64)\shared;$env:PATH"
@@ -137,8 +148,8 @@ $env:PATH = "$(go list -m -f '{{.Dir}}' github.com/belluikit/goffmpeg-libs/windo
 CI does the same in its Windows test legs.
 
 A package should copy the libraries its binary lists (`otool -L`, `readelf -d`,
-`objdump -p`), not every file in `shared/`: an audio-only binary lists no
-libswscale. `scripts/check-links.sh` checks a built binary the same way. CI runs
+`objdump -p`), from the set's directory: an audio-only binary lists the
+`-goffmpeg-audio` libraries of `shared-audio/` and nothing of `shared/`. `scripts/check-links.sh` checks a built binary the same way. CI runs
 it on every target it links, with and without `goffmpeg_novideo`, and
 `TestLinksSharedFFmpeg` checks it from inside wherever the tests run.
 
@@ -271,10 +282,41 @@ darwin_arm64, linux_amd64, linux_arm64 and both Windows targets.
 
 ## What is in the build
 
-A broad **decode-only** FFmpeg: every native decoder, demuxer, parser and
-protocol (484 decoders, 359 demuxers), with encoders, muxers and avfilter
-disabled because this library only ever decodes. That keeps libavcodec around
-11MB on android/arm64 rather than a stock build's bulk.
+A **decode-only** FFmpeg in two **codec sets** (#41), each decoding only what
+apps play, so an app carries no codec it doesn't need, and none of the
+patent-encumbered ones unless it plays them. Encoders, muxers and avfilter are
+off in both: this library only ever decodes.
+
+| Set | Plays | Decoders | Demuxers | Where |
+|---|---|---|---|---|
+| **media** | MP3, WAV, MP4 with H.264 and AAC; webcams on desktop | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`; desktop also `rawvideo`, `mjpeg` | `mp3`, `wav`, `mov` | `shared/`, `-goffmpeg` |
+| **audio** | MP3, WAV | `mp3float`, the same PCM | `mp3`, `wav` | `shared-audio/`, `-goffmpeg-audio` |
+
+The audio set has no libswscale and no libavdevice. goffmpeg links it under the
+`goffmpeg_novideo` tag. On Apple, the media set enables VideoToolbox's H.264
+hwaccel and no other. Each set has the parsers its formats need (`mpegaudio`,
+and `h264` and `aac` in the media set), and no bitstream filter that isn't
+selected by something it keeps. Every protocol stays, so `http`, and `https`
+where the target has TLS, still open.
+
+On darwin_arm64 the libraries come to 4.9 MB for the media set and 1.8 MB for
+the audio set, against 15.1 MB for the every-decoder build goffmpeg-libs
+published until v0.5.0. libavcodec alone is 2.0 MB and 0.4 MB, against 11.2 MB.
+
+**The sets are enforced, not only configured.** `configure` turns on whatever
+an enabled component selects, so a flag that asks for one decoder can bring
+others: VideoToolbox's HEVC, AV1 and VP9 hwaccels brought their decoders back,
+and the `eac3_core` and `dts2pts` filters the AC-3 and HEVC parsers. So every
+build starts with decoders, demuxers, parsers, bitstream filters and hwaccels
+off, and `make dist` runs `scripts/check-components.sh`, which fails the build
+when `config_components.h` enables anything but the set's lists. At run time,
+`TestBuiltCodecsAreTheSet` lists the decoders and demuxers the loaded FFmpeg
+holds and compares them with the same lists.
+
+An input in a container a set leaves out fails to open with
+`ErrUnrecognizedInput`. A stream whose codec it leaves out is named in
+`MissingDecoder`, and an input with nothing it decodes fails with
+`ErrNoDecoder` (README, "When a build can't decode something").
 
 `--disable-autodetect` is deliberate. It stops `configure` from linking
 whatever happens to be installed on the build machine, which would make the
