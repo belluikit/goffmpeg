@@ -160,22 +160,24 @@ $(error unknown TARGET "$(TARGET)" — see the target matrix in this Makefile)
 endif
 
 # --- Codec sets (#41) --------------------------------------------------------
-# Every target is built twice, each build decoding only what apps play (the
-# owner's lists on #41), so an app carries no codec it doesn't need, and none
-# of the patent-encumbered ones unless it plays them:
+# Every target is built twice (the owner's choices on #41):
 #
-#   SET=media  MP3, WAV, and MP4 with H.264 video and AAC audio. On desktop
-#              also rawvideo and MJPEG, what webcams hand to capture. In
-#              shared/, named -goffmpeg as before.
-#   SET=audio  MP3 and WAV only: no video decoder, no libswscale, no
-#              libavdevice. In shared-audio/, named -goffmpeg-audio, so a
-#              binary shows which set it loads and a package can't mix the
-#              two. goffmpeg's goffmpeg_novideo tag links it.
+#   SET=media  On the phones (android_*, ios_*), only what apps play: MP3,
+#              WAV, MP4 and HLS with H.264 video and AAC audio, so an app
+#              carries no codec it doesn't need. On desktop (darwin_*,
+#              linux_*, windows_*), every decoder, demuxer and parser FFmpeg
+#              has. In shared/, named -goffmpeg as before.
+#   SET=audio  MP3 and WAV only, on every target: no video decoder, no
+#              libswscale, no libavdevice. In shared-audio/, named
+#              -goffmpeg-audio, so a binary shows which set it loads and a
+#              package can't mix the two. goffmpeg's goffmpeg_novideo tag
+#              links it.
 #
-# Decoders, demuxers and parsers start empty, and only the set's are enabled.
-# Protocols are untouched: http, and https where the target has TLS, still
-# open. An input in a container left out fails with ErrUnrecognizedInput, and
-# a stream whose codec is left out is named in MissingDecoder.
+# In a trimmed set, decoders, demuxers and parsers start empty and only the
+# set's are enabled. Protocols are untouched: http, and https where the target
+# has TLS, still open. An input in a container left out fails with
+# ErrUnrecognizedInput, and a stream whose codec is left out is named in
+# MissingDecoder.
 SET ?= media
 comma := ,
 empty :=
@@ -219,18 +221,30 @@ ifeq ($(SET)$(filter darwin_% ios_% iossimulator_%,$(TARGET)),media$(TARGET))
 	SET_HWACCELS += h264_videotoolbox
 endif
 
-# Decoders, demuxers, parsers, bitstream filters, hwaccels and input devices all
-# start empty.
+# The desktop media set has every codec (owner, #41): the lists above are
+# then a floor rather than the set. check-components holds the build to having
+# at least them and at least EVERY_MIN_DECODERS decoders, and to exactly its
+# one camera input device.
+EVERY_CODEC := $(if $(and $(filter media,$(SET)),$(filter darwin_% linux_% windows_%,$(TARGET))),1,)
+EVERY_MIN_DECODERS := 300
+
+# In a trimmed set, decoders, demuxers, parsers, bitstream filters, hwaccels and
+# input devices all start empty.
 # Left enabled, filters and hwaccels select decoders and parsers back in:
 # videotoolbox's hevc, av1 and vp9 hwaccels brought their decoders, and the
 # eac3_core and dts2pts filters the ac3 and hevc parsers. A component a set
 # keeps still selects what it needs.
+ifeq ($(EVERY_CODEC),1)
+# Everything FFmpeg has, as before v0.6.0, but one input device.
+SET_CONF = --disable-indevs
+else
 SET_CONF = --disable-decoders --disable-demuxers --disable-parsers --disable-bsfs --disable-hwaccels --disable-indevs \
 	--enable-demuxer=$(subst $(space),$(comma),$(strip $(SET_DEMUXERS))) \
 	--enable-decoder=$(subst $(space),$(comma),$(strip $(SET_DECODERS))) \
 	--enable-parser=$(subst $(space),$(comma),$(strip $(SET_PARSERS)))
 ifneq ($(strip $(SET_HWACCELS)),)
 	SET_CONF += --enable-hwaccel=$(subst $(space),$(comma),$(strip $(SET_HWACCELS)))
+endif
 endif
 ifneq ($(strip $(SET_INDEVS)),)
 	SET_CONF += --enable-indev=$(subst $(space),$(comma),$(strip $(SET_INDEVS)))
@@ -355,6 +369,7 @@ dist: check-src patch-src
 check-components:
 	DECODERS="$(SET_DECODERS)" DEMUXERS="$(SET_DEMUXERS)" PARSERS="$(SET_PARSERS)" \
 		HWACCELS="$(SET_HWACCELS)" INDEVS="$(SET_INDEVS)" \
+		$(if $(EVERY_CODEC),AT_LEAST="DECODER DEMUXER PARSER HWACCEL" MIN_DECODERS=$(EVERY_MIN_DECODERS)) \
 		scripts/check-components.sh "$(SHARED_BUILD_DIR)"
 
 # check-shared refuses a shared build whose names or links would not load: a
