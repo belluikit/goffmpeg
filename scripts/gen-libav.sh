@@ -2,29 +2,30 @@
 # gen-libav.sh TARGET MODDIR
 #
 # Writes the cgo link files of one goffmpeg-libs module, MODDIR (its directory
-# for TARGET), from the shared libraries in MODDIR/shared:
+# for TARGET), from the shared libraries in it. A module carries two codec sets
+# (#41), and the goffmpeg_novideo tag picks one:
 #
-#   libav.go          links every FFmpeg library but libswscale
-#   libav_swscale.go  links libswscale, unless the build has the
-#                     goffmpeg_novideo tag (#43), which never calls it
+#   libav.go        without the tag: the media set, from shared/
+#   libav_audio.go  with goffmpeg_novideo: the audio set, from shared-audio/,
+#                   which has no libswscale and no libavdevice
 #
-# libswscale is a file of its own so that an audio-only binary does not list it
-# as a dependency at all: a linker records a shared library linked by path even
-# when nothing calls it (measured on macOS and the Android NDK, goffmpeg#40),
-# and a package without libswscale would then not load.
+# A binary links exactly one set, so it lists only that set's libraries and a
+# package carries only those. (goffmpeg-libs v0.4.0 and v0.5.0 split libswscale
+# into libav_swscale.go instead; it is removed here.)
 #
 # The link names each library by file: Go module zips leave out symlinks, so
 # there is no libavcodec.dylib or libavcodec.so for -lavcodec to find. On Linux
 # that is -l:<soname>, because cgo refuses a path ending in .so.63 (Go's
 # cmd/go/internal/work/security.go accepts .so, not .so.N).
 #
-# macOS and Linux get an rpath to the module's own shared/, so `go run` and
-# `go test` find the libraries in the module cache with no setup. Packaging
-# replaces it: the rpath names the build machine's module cache, and a packaged
-# app carries the libraries itself. iOS gets no rpath here: the app supplies
-# @executable_path/Frameworks, and cgo refuses an rpath that starts with @.
-# Android loads from the APK's lib/<abi>/. Windows has no rpath: development
-# puts shared/ on PATH, a package puts the DLLs beside the executable.
+# macOS and Linux get an rpath to the set's directory in the module, so `go
+# run` and `go test` find the libraries in the module cache with no setup.
+# Packaging replaces it: the rpath names the build machine's module cache, and
+# a packaged app carries the libraries itself. iOS gets no rpath here: the app
+# supplies @executable_path/Frameworks, and cgo refuses an rpath that starts
+# with @. Android loads from the APK's lib/<abi>/. Windows has no rpath:
+# development puts the set's directory on PATH, a package puts the DLLs beside
+# the executable.
 set -euo pipefail
 
 target=$1
@@ -46,80 +47,70 @@ case "$target" in
     *) echo "gen-libav: unknown target $target" >&2; exit 1 ;;
 esac
 
-libs=$("$here/shared-libs.sh" "$target" "$moddir/shared")
-
-# link prints the arguments that link one library, from its shared-libs line.
-link() {
-    local name=$1 file=$2
-    case "$target" in
-        ios_* | iossimulator_*) printf '%s' "-framework lib$name-goffmpeg" ;;
-        linux_*)                printf '%s' "-l:$file" ;;
-        *)                      printf '%s' "\${SRCDIR}/shared/$file" ;;
-    esac
-}
-
-main="" video=""
-while read -r name file _; do
-    if [ "$name" = swscale ]; then
-        video=$(link "$name" "$file")
-    else
-        main="$main${main:+ }$(link "$name" "$file")"
-    fi
-done <<< "$libs"
-
 # What goffmpeg's own C needs from the system. FFmpeg's dependencies arrive
 # with the shared libraries; these are the bridge's.
 case "$target" in
     darwin_*)
         # bridge_avf_darwin.m reads capture modes from AVFoundation.
-        search="" extra="-Wl,-rpath,\${SRCDIR}/shared -framework AVFoundation -framework CoreMedia -framework Foundation" ;;
-    ios_* | iossimulator_*)
-        search="-F\${SRCDIR}/shared" extra="" ;;
-    linux_*)
-        search="-L\${SRCDIR}/shared" extra="-Wl,-rpath,\${SRCDIR}/shared -lm" ;;
-    android_*)
-        search="" extra="-lm" ;;
+        system="-framework AVFoundation -framework CoreMedia -framework Foundation" ;;
+    linux_* | android_*)
+        system="-lm" ;;
     windows_*)
         # dshow capture is COM. The rest is the list the static link needed;
         # an import library adds an import only for a symbol actually used, so
         # what is not needed costs nothing.
-        search="" extra="-lm -lole32 -loleaut32 -lstrmiids -luuid -lsecur32 -lbcrypt -lws2_32 -lgdi32 -luser32 -lshlwapi -lcrypt32" ;;
+        system="-lm -lole32 -loleaut32 -lstrmiids -luuid -lsecur32 -lbcrypt -lws2_32 -lgdi32 -luser32 -lshlwapi -lcrypt32" ;;
+    *)  system="" ;;
 esac
 
-header() {
-    cat <<EOF
+# write FILE BUILD-CONSTRAINT SET DIR COMMENT writes the link file for one set.
+write() {
+    local file=$1 build=$2 set=$3 dir=$4 comment=$5
+    local libs link="" search="" rpath=""
+    libs=$("$here/shared-libs.sh" "$target" "$moddir/$dir" "$set")
+    while read -r name file_ _; do
+        case "$target" in
+            ios_* | iossimulator_*) link="$link${link:+ }-framework ${file_%.framework}" ;;
+            linux_*)                link="$link${link:+ }-l:$file_" ;;
+            *)                      link="$link${link:+ }\${SRCDIR}/$dir/$file_" ;;
+        esac
+    done <<< "$libs"
+    case "$target" in
+        ios_* | iossimulator_*) search="-F\${SRCDIR}/$dir" ;;
+        linux_*)                search="-L\${SRCDIR}/$dir" ;;
+    esac
+    case "$target" in
+        darwin_* | linux_*) rpath="-Wl,-rpath,\${SRCDIR}/$dir" ;;
+    esac
+    local extra="$rpath${rpath:+${system:+ }}$system"
+    {
+        cat <<EOF
 // Code generated by goffmpeg's scripts/gen-libav.sh from the libraries in
-// shared/. DO NOT EDIT: change that script and run make sync-libs.
+// $dir/. DO NOT EDIT: change that script and run make sync-libs.
 
-//go:build $1
+//go:build $build
 
 package $target
 
+$comment
+
 EOF
+        echo "/*"
+        [ -n "$search" ] && echo "#cgo LDFLAGS: $search"
+        echo "#cgo LDFLAGS: $link"
+        [ -n "$extra" ] && echo "#cgo LDFLAGS: $extra"
+        echo "*/"
+        echo 'import "C"'
+    } > "$moddir/$file"
 }
 
-{
-    header "$constraint"
-    echo "/*"
-    [ -n "$search" ] && echo "#cgo LDFLAGS: $search"
-    echo "#cgo LDFLAGS: $main"
-    [ -n "$extra" ] && echo "#cgo LDFLAGS: $extra"
-    echo "*/"
-    echo 'import "C"'
-} > "$moddir/libav.go"
+write libav.go "$constraint && !goffmpeg_novideo" media shared \
+    "// The media codec set (#41): MP3, WAV, and MP4 with H.264 and AAC."
+write libav_audio.go "$constraint && goffmpeg_novideo" audio shared-audio \
+    "// The audio codec set (#41), for goffmpeg_novideo builds: MP3 and WAV, with
+// no libswscale and no libavdevice."
+rm -f "$moddir/libav_swscale.go"
 
-{
-    header "$constraint && !goffmpeg_novideo"
-    echo "// libswscale turns decoded video into RGBA. An audio-only build"
-    echo "// (goffmpeg_novideo) never calls it, and leaves it out of the link."
-    echo ""
-    echo "/*"
-    [ -n "$search" ] && echo "#cgo LDFLAGS: $search"
-    echo "#cgo LDFLAGS: $video"
-    echo "*/"
-    echo 'import "C"'
-} > "$moddir/libav_swscale.go"
-
-unformatted=$(gofmt -l "$moddir/libav.go" "$moddir/libav_swscale.go")
+unformatted=$(gofmt -l "$moddir/libav.go" "$moddir/libav_audio.go")
 [ -z "$unformatted" ] || { echo "gen-libav: not gofmt-clean: $unformatted" >&2; exit 1; }
-echo "==> $target: wrote libav.go and libav_swscale.go in $moddir"
+echo "==> $target: wrote libav.go and libav_audio.go in $moddir"

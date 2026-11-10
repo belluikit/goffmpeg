@@ -48,10 +48,9 @@ BASE_CONF = \
 # targets omit it to keep the mobile binaries lean.
 MACOS_MIN  := 11.0
 IOS_MIN    := 13.0
-APPLE_CONF = --enable-securetransport --enable-videotoolbox \
-	--enable-hwaccel=h264_videotoolbox,hevc_videotoolbox,vp9_videotoolbox,av1_videotoolbox
+APPLE_CONF = --enable-securetransport --enable-videotoolbox
 
-MACOS_CONF = $(APPLE_CONF) --enable-avdevice --enable-indev=avfoundation --enable-avfoundation
+MACOS_CONF = $(APPLE_CONF) --enable-avdevice --enable-avfoundation
 
 ifeq ($(TARGET),darwin_arm64)
 	TARGET_CONF = --arch=arm64 --target-os=darwin $(MACOS_CONF) \
@@ -128,12 +127,12 @@ endif
 # host produces.
 GLIBC_FLOOR := 2.35
 ifeq ($(TARGET),linux_amd64)
-	TARGET_CONF = --arch=x86_64 --target-os=linux --enable-openssl --enable-avdevice --enable-indev=v4l2
+	TARGET_CONF = --arch=x86_64 --target-os=linux --enable-openssl --enable-avdevice
 	LIB_EXT = so
 endif
 
 ifeq ($(TARGET),linux_arm64)
-	TARGET_CONF = --arch=aarch64 --target-os=linux --enable-openssl --enable-avdevice --enable-indev=v4l2
+	TARGET_CONF = --arch=aarch64 --target-os=linux --enable-openssl --enable-avdevice
 	LIB_EXT = so
 endif
 
@@ -141,7 +140,7 @@ endif
 ifeq ($(TARGET),windows_amd64)
 	TARGET_CONF = --arch=x86_64 --target-os=mingw32 --enable-cross-compile \
 		--cross-prefix=x86_64-w64-mingw32- --enable-schannel \
-		--enable-avdevice --enable-indev=dshow
+		--enable-avdevice
 	LIB_EXT = dll
 endif
 
@@ -152,7 +151,7 @@ LLVM_MINGW ?= /opt/llvm-mingw
 ifeq ($(TARGET),windows_arm64)
 	TARGET_CONF = --arch=aarch64 --target-os=mingw32 --enable-cross-compile \
 		--cross-prefix=$(LLVM_MINGW)/bin/aarch64-w64-mingw32- --enable-schannel \
-		--enable-avdevice --enable-indev=dshow
+		--enable-avdevice
 	LIB_EXT = dll
 endif
 
@@ -160,7 +159,81 @@ ifndef TARGET_CONF
 $(error unknown TARGET "$(TARGET)" — see the target matrix in this Makefile)
 endif
 
-FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF)
+# --- Codec sets (#41) --------------------------------------------------------
+# Every target is built twice, each build decoding only what apps play (the
+# owner's lists on #41), so an app carries no codec it doesn't need, and none
+# of the patent-encumbered ones unless it plays them:
+#
+#   SET=media  MP3, WAV, and MP4 with H.264 video and AAC audio. On desktop
+#              also rawvideo and MJPEG, what webcams hand to capture. In
+#              shared/, named -goffmpeg as before.
+#   SET=audio  MP3 and WAV only: no video decoder, no libswscale, no
+#              libavdevice. In shared-audio/, named -goffmpeg-audio, so a
+#              binary shows which set it loads and a package can't mix the
+#              two. goffmpeg's goffmpeg_novideo tag links it.
+#
+# Decoders, demuxers and parsers start empty, and only the set's are enabled.
+# Protocols are untouched: http, and https where the target has TLS, still
+# open. An input in a container left out fails with ErrUnrecognizedInput, and
+# a stream whose codec is left out is named in MissingDecoder.
+SET ?= media
+comma := ,
+empty :=
+space := $(empty) $(empty)
+# What each set decodes, as FFmpeg's component names. The configure flags are
+# made from these lists, and check-components holds the configured build to
+# them exactly.
+SET_DEMUXERS = mp3 wav
+SET_DECODERS = mp3float pcm_s16le pcm_s24le pcm_s32le pcm_f32le pcm_f64le pcm_u8
+SET_PARSERS  = mpegaudio
+SET_HWACCELS =
+SET_INDEVS   =
+ifeq ($(SET),media)
+	SET_DEMUXERS += mov
+	SET_DECODERS += h264 aac
+	SET_PARSERS  += h264 aac
+	SHARED_SUFFIX   := -goffmpeg
+	SHARED_DIR_NAME := shared
+else ifeq ($(SET),audio)
+	SHARED_SUFFIX   := -goffmpeg-audio
+	SHARED_DIR_NAME := shared-audio
+else
+$(error unknown SET "$(SET)": media or audio)
+endif
+# Webcam capture, desktop and media set only: the one input device that
+# reads cameras on each OS, and the decoders for what cameras deliver, raw
+# frames or MJPEG (v4l2, dshow). The other input devices are off: they aren't
+# used, and gdigrab, Windows' screen capture, selects the bmp decoder.
+ifeq ($(SET)$(filter darwin_% linux_% windows_%,$(TARGET)),media$(TARGET))
+	SET_DECODERS += rawvideo mjpeg
+	SET_INDEVS   += $(if $(filter darwin_%,$(TARGET)),avfoundation,$(if $(filter linux_%,$(TARGET)),v4l2,dshow))
+endif
+# VideoToolbox decodes through FFmpeg's own h264 decoder, which it selects.
+ifeq ($(SET)$(filter darwin_% ios_% iossimulator_%,$(TARGET)),media$(TARGET))
+	SET_HWACCELS += h264_videotoolbox
+endif
+
+# Decoders, demuxers, parsers, bitstream filters, hwaccels and input devices all
+# start empty.
+# Left enabled, filters and hwaccels select decoders and parsers back in:
+# videotoolbox's hevc, av1 and vp9 hwaccels brought their decoders, and the
+# eac3_core and dts2pts filters the ac3 and hevc parsers. A component a set
+# keeps still selects what it needs.
+SET_CONF = --disable-decoders --disable-demuxers --disable-parsers --disable-bsfs --disable-hwaccels --disable-indevs \
+	--enable-demuxer=$(subst $(space),$(comma),$(strip $(SET_DEMUXERS))) \
+	--enable-decoder=$(subst $(space),$(comma),$(strip $(SET_DECODERS))) \
+	--enable-parser=$(subst $(space),$(comma),$(strip $(SET_PARSERS)))
+ifneq ($(strip $(SET_HWACCELS)),)
+	SET_CONF += --enable-hwaccel=$(subst $(space),$(comma),$(strip $(SET_HWACCELS)))
+endif
+ifneq ($(strip $(SET_INDEVS)),)
+	SET_CONF += --enable-indev=$(subst $(space),$(comma),$(strip $(SET_INDEVS)))
+endif
+ifeq ($(SET),audio)
+	SET_CONF += --disable-swscale --disable-avdevice --disable-videotoolbox
+endif
+
+FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF) $(SET_CONF)
 
 # --- Shared libraries -------------------------------------------------------
 # Player's ADR-0037 D3 ships FFmpeg as shared libraries on every platform, so a
@@ -177,10 +250,11 @@ FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF)
 # The libraries carry no rpath of their own. Whatever loads them supplies it:
 # the executable's rpath on macOS and Linux, the app's lib/<abi> on Android,
 # the executable's directory on Windows.
-SHARED_SUFFIX    := -goffmpeg
-SHARED_BUILD_DIR := $(BUILD_ROOT)/$(TARGET)-shared
-SHARED_STAGE     := $(BUILD_ROOT)/$(TARGET)-shared-install
-SHARED_DIR       := $(DIST_DIR)/shared
+#
+# SHARED_SUFFIX and SHARED_DIR_NAME come from the codec set above.
+SHARED_BUILD_DIR := $(BUILD_ROOT)/$(TARGET)-$(SHARED_DIR_NAME)
+SHARED_STAGE     := $(BUILD_ROOT)/$(TARGET)-$(SHARED_DIR_NAME)-install
+SHARED_DIR       := $(DIST_DIR)/$(SHARED_DIR_NAME)
 
 SHARED_CONF = --enable-shared --disable-static --build-suffix=$(SHARED_SUFFIX)
 # Apple: @rpath install names, so a consumer finds the libraries through its
@@ -202,7 +276,7 @@ endif
 
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
         bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths \
-        check-shared smoke-shared
+        check-shared check-components smoke-shared
 
 # `all` builds the host target only. Use dist-all for the full matrix.
 all: dist
@@ -259,12 +333,23 @@ print-config: check-src
 dist: check-src patch-src
 	@mkdir -p "$(SHARED_BUILD_DIR)"
 	cd "$(SHARED_BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
+	@$(MAKE) --no-print-directory check-components TARGET=$(TARGET) SET=$(SET)
 	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC)
 	rm -rf "$(SHARED_STAGE)"
 	$(MAKE) -C "$(SHARED_BUILD_DIR)" install DESTDIR="$(SHARED_STAGE)"
-	IOS_MIN="$(IOS_MIN)" scripts/stage-shared.sh "$(TARGET)" "$(SHARED_STAGE)/$(TARGET)" "$(SHARED_DIR)"
-	@$(MAKE) --no-print-directory check-shared TARGET=$(TARGET)
-	@echo "==> $(TARGET) shared libraries installed to $(SHARED_DIR)"
+	IOS_MIN="$(IOS_MIN)" SHARED_SUFFIX="$(SHARED_SUFFIX)" \
+		scripts/stage-shared.sh "$(TARGET)" "$(SHARED_STAGE)/$(TARGET)" "$(SHARED_DIR)"
+	@$(MAKE) --no-print-directory check-shared TARGET=$(TARGET) SET=$(SET)
+	@echo "==> $(TARGET) $(SET) set's shared libraries installed to $(SHARED_DIR)"
+
+# check-components holds the configured build to its codec set's lists (#41):
+# configure enables what an enabled component selects, and this fails a build
+# that carries a decoder, demuxer, parser, hwaccel or input device the set
+# doesn't list. dist runs it after configure, before compiling anything.
+check-components:
+	DECODERS="$(SET_DECODERS)" DEMUXERS="$(SET_DEMUXERS)" PARSERS="$(SET_PARSERS)" \
+		HWACCELS="$(SET_HWACCELS)" INDEVS="$(SET_INDEVS)" \
+		scripts/check-components.sh "$(SHARED_BUILD_DIR)"
 
 # check-shared refuses a shared build whose names or links would not load: a
 # soname or install name that is not the file's own name, a dependency on a
@@ -274,7 +359,7 @@ dist: check-src patch-src
 # the libraries are named.
 check-shared:
 	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
-	READELF="$(SHARED_READELF)" OBJDUMP="$(SHARED_OBJDUMP)" IOS_MIN="$(IOS_MIN)" GLIBC_FLOOR="$(GLIBC_FLOOR)" \
+	READELF="$(SHARED_READELF)" OBJDUMP="$(SHARED_OBJDUMP)" IOS_MIN="$(IOS_MIN)" GLIBC_FLOOR="$(GLIBC_FLOOR)" SET="$(SET)" \
 		scripts/check-shared.sh "$(TARGET)" "$(SHARED_DIR)"
 
 # Tools check-shared reads the binaries with, by target rather than by host.
@@ -295,8 +380,10 @@ endif
 # and checks that the libraries it loaded are the shared build. Linking proves
 # the import names resolve; running proves the loader finds each library and
 # its dependencies the way a consumer will, through an rpath.
-SMOKE_DIR := $(BUILD_ROOT)/$(TARGET)-smoke
+SMOKE_DIR := $(BUILD_ROOT)/$(TARGET)-$(SHARED_DIR_NAME)-smoke
 SMOKE_RUN ?= auto
+# The media set decodes the video of an MP4, the audio set an MP3.
+SMOKE_SAMPLE = $(ROOT)/testdata/$(if $(filter audio,$(SET)),sample_cover.mp3,sample.mp4)
 ifeq ($(TARGET),darwin_arm64)
 	SMOKE_CC = clang -arch arm64 -mmacosx-version-min=$(MACOS_MIN)
 endif
@@ -330,8 +417,8 @@ endif
 
 smoke-shared:
 	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
-	SMOKE_CC="$(SMOKE_CC)" SMOKE_RUN="$(SMOKE_RUN)" INCLUDE="$(ROOT)/internal/libav/include" \
-		scripts/smoke-shared.sh "$(TARGET)" "$(SHARED_DIR)" "$(SMOKE_DIR)" "$(ROOT)/testdata/sample.mp4"
+	SMOKE_CC="$(SMOKE_CC)" SMOKE_RUN="$(SMOKE_RUN)" SMOKE_SET="$(SET)" INCLUDE="$(ROOT)/internal/libav/include" \
+		scripts/smoke-shared.sh "$(TARGET)" "$(SHARED_DIR)" "$(SMOKE_DIR)" "$(SMOKE_SAMPLE)"
 
 # Every target this host can build without a container or extra toolchain.
 HOST_TARGETS = darwin_arm64 darwin_amd64 ios_arm64 iossimulator_arm64 \
@@ -435,7 +522,9 @@ sync-libs: check-paths
 		mkdir -p "$(LIBS_REPO)/$(TARGET)/lib" && cp "$(DIST_DIR)"/lib/libgoffmpeg.* "$(LIBS_REPO)/$(TARGET)/lib/" && \
 		echo "    (including the purego shared bridge)"; fi
 	@rmdir "$(LIBS_REPO)/$(TARGET)/lib" 2>/dev/null || true
-	rm -rf "$(LIBS_REPO)/$(TARGET)/shared" && cp -R "$(SHARED_DIR)" "$(LIBS_REPO)/$(TARGET)/shared"
+	for d in shared shared-audio; do \
+		rm -rf "$(LIBS_REPO)/$(TARGET)/$$d" && cp -R "$(DIST_DIR)/$$d" "$(LIBS_REPO)/$(TARGET)/$$d" || exit 1; \
+	done
 	scripts/gen-libav.sh $(TARGET) "$(LIBS_REPO)/$(TARGET)"
 	@echo "==> $(TARGET) libraries synced to $(LIBS_REPO)/$(TARGET)"
 
@@ -446,15 +535,20 @@ sync-libs: check-paths
 # which is allowed: the Android NDK and llvm-mingw's own CRT carry such paths
 # and cannot be told not to. "FFmpeg version" must be found in the shared
 # libavutil, so a scan that reads nothing fails instead of passing.
+#
+# It reads both codec sets, shared/ and shared-audio/, which a goffmpeg-libs
+# module carries together (#41), so both must have been built.
 check-paths:
-	@test -d "$(SHARED_DIR)" || { echo "no shared build for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
-	@n=$$(find "$(SHARED_DIR)" -type f -name '*avutil*' -exec grep -la 'FFmpeg version' {} + | wc -l); \
-		[ "$$n" -ge 1 ] || { echo "check-paths: 'FFmpeg version' not found in the shared libavutil, so the scan is not reading shared/"; exit 1; }
-	@bad=$$(find "$(DIST_DIR)/lib" "$(DIST_DIR)/shared" -type f 2>/dev/null | while read -r f; do \
+	@for d in shared shared-audio; do \
+		test -d "$(DIST_DIR)/$$d" || { echo "no $$d/ for $(TARGET) — run: make dist TARGET=$(TARGET) and make dist TARGET=$(TARGET) SET=audio"; exit 1; }; \
+		n=$$(find "$(DIST_DIR)/$$d" -type f -name '*avutil*' -exec grep -la 'FFmpeg version' {} + | wc -l); \
+		[ "$$n" -ge 1 ] || { echo "check-paths: 'FFmpeg version' not found in $$d/'s libavutil, so the scan is not reading it"; exit 1; }; \
+	done
+	@bad=$$(find "$(DIST_DIR)/lib" "$(DIST_DIR)/shared" "$(DIST_DIR)/shared-audio" -type f 2>/dev/null | while read -r f; do \
 		LC_ALL=C grep -aoE '/(Users|home)/[A-Za-z0-9._-]+/' "$$f" | grep -vxE '/(Users|home)/runner/' | sed "s|^|$${f#$(DIST_DIR)/}: |"; \
 		done | sort | uniq -c); \
 	if [ -n "$$bad" ]; then echo "check-paths: $(TARGET) libraries name a personal home directory:"; echo "$$bad"; exit 1; fi
-	@echo "==> $(TARGET): no personal home directories in lib/ or shared/"
+	@echo "==> $(TARGET): no personal home directories in lib/, shared/ or shared-audio/"
 
 # The FFmpeg public headers are identical for every target, so one copy lives
 # in this module and all platforms compile against it. They come from the
@@ -472,6 +566,7 @@ sync-headers:
 # built (or synced from a companion module), and re-running configure+make to
 # produce a 75KB wrapper wastes minutes.
 bridge-shared:
+	@[ "$(SET)" = media ] || { echo "bridge-shared: the purego bridge has video; it links the media set (SET=media)"; exit 1; }
 	@test -d "$(SHARED_DIR)" || { \
 		echo "no shared libraries for $(TARGET) — run: make dist TARGET=$(TARGET)"; exit 1; }
 	@mkdir -p "$(DIST_DIR)/lib"

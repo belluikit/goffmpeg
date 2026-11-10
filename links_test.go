@@ -18,8 +18,9 @@ import (
 // beside the binary. The binary's own list of imported libraries is read,
 // rather than its symbols, because a library linked by path is imported even
 // when nothing calls it (#40). Only the -goffmpeg names count, so a system
-// FFmpeg could not stand in for them. It skips where the format isn't read
-// here.
+// FFmpeg could not stand in for them. The codec set the libraries come from
+// (#41) is recorded too: "set:audio" for -goffmpeg-audio names, "set:media"
+// for -goffmpeg alone. It skips where the format isn't read here.
 func linkedFFmpeg(t *testing.T) map[string]bool {
 	t.Helper()
 	exe, err := os.Executable()
@@ -81,8 +82,15 @@ func linkedFFmpeg(t *testing.T) map[string]bool {
 		// @rpath/libavcodec-goffmpeg.63.dylib, @rpath/libavcodec-goffmpeg.framework/libavcodec-goffmpeg,
 		// libavcodec-goffmpeg.so.63, avcodec-goffmpeg-63.dll
 		base := path.Base(strings.ReplaceAll(lib, `\`, "/"))
-		if name, _, ok := strings.Cut(strings.ToLower(base), "-goffmpeg"); ok {
-			got[strings.TrimPrefix(name, "lib")] = true
+		name, rest, ok := strings.Cut(strings.ToLower(base), "-goffmpeg")
+		if !ok {
+			continue
+		}
+		got[strings.TrimPrefix(name, "lib")] = true
+		if strings.HasPrefix(rest, "-audio") {
+			got["set:audio"] = true
+		} else {
+			got["set:media"] = true
 		}
 	}
 	return got
@@ -107,9 +115,19 @@ func requireSharedFFmpeg(t *testing.T) map[string]bool {
 // into the binary itself.
 func TestLinksSharedFFmpeg(t *testing.T) {
 	got := requireSharedFFmpeg(t)
+	// One codec set, and the one the build tag picks (#41). A goffmpeg-libs
+	// older than the sets has only the media set, which a goffmpeg_novideo
+	// build then links too.
+	if got["set:audio"] && got["set:media"] {
+		t.Error("the binary imports libraries of both codec sets")
+	}
+	if testCodecSet == "media" && !got["set:media"] {
+		t.Error("a build without goffmpeg_novideo doesn't import the media set's libraries")
+	}
 	want := []string{"avformat", "avcodec", "swresample", "avutil"}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows" {
-		want = append(want, "avdevice") // capture, desktop only
+	desktop := runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows"
+	if desktop && got["set:media"] {
+		want = append(want, "avdevice") // capture: desktop, media set only
 	}
 	for _, lib := range want {
 		if !got[lib] {

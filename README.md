@@ -179,16 +179,28 @@ them (LGPL 2.1 §6b). An app ships them beside its binary. `go run` and `go
 test` find them in the module cache on macOS and Linux; on Windows, put the
 module's `shared/` on `PATH` first. See [BUILDING.md](BUILDING.md#linking).
 
+## Formats
+
+goffmpeg's FFmpeg decodes what apps play, in two codec sets (#41):
+
+| Set | Plays | Linked by |
+|---|---|---|
+| **media** | MP3, WAV, and MP4 (`.mp4`, `.m4a`, `.mov`) with H.264 video and AAC audio; on desktop, webcam capture | default |
+| **audio** | MP3 and WAV | `-tags goffmpeg_novideo` |
+
+Anything else, such as FLAC, Ogg, HEVC, VP9 or HLS, isn't built, and opening it
+says so ("When a build can't decode something", below). The exact lists are in
+[BUILDING.md](BUILDING.md#what-is-in-the-build).
+
 ## Audio only
 
-`-tags goffmpeg_novideo` builds the cgo backend for audio alone. The bridge opens
-no video stream and never calls libswscale, and the binary doesn't load it, so
-an app ships without it (about 1.2 MB on android/arm64). A file with video still opens and plays its audio. No video frame
-arrives, `VideoInfo` reports no size and names the video's codec in
-`MissingDecoder`, and `GetRGBA` returns `ErrVideoNotBuilt`. A file with only
-video fails to open with `ErrNoDecoder`. Camera capture needs video, so leave
-the tag off for it. The tag doesn't change the purego backend, which loads a
-prebuilt `libgoffmpeg` that has video.
+`-tags goffmpeg_novideo` builds the cgo backend against the audio set: MP3 and
+WAV, with no libswscale and no libavdevice, so an app ships 1.8 MB of FFmpeg
+where the media set is 4.9 MB (darwin_arm64). No video frame arrives,
+`GetRGBA` returns `ErrVideoNotBuilt`, and there's no capture: `OpenDevice`
+says the build has no libavdevice. An MP4 fails to open with
+`ErrUnrecognizedInput`. The tag doesn't change the purego backend, which loads
+a prebuilt `libgoffmpeg` that links the media set.
 
 ## When a build can't decode something
 

@@ -20,6 +20,10 @@ case $target in
 android_*|ios_*|iossimulator_*) libs="avutil swresample swscale avcodec avformat" ;;
 *) libs="avutil swresample swscale avcodec avformat avdevice" ;;
 esac
+# The audio codec set (#41) has neither libswscale nor libavdevice.
+case ${SET:-media} in
+audio) libs="avutil swresample avcodec avformat" ;;
+esac
 
 checked=0
 for l in $libs; do
@@ -87,7 +91,7 @@ for l in $libs; do
 		echo "$dyn" | grep -qE '\(TEXTREL\)|TEXTREL' && err "${f##*/} has text relocations"
 		for dep in $(echo "$dyn" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
 			case $dep in
-			lib*-goffmpeg.so*) [ -f "$dir/$dep" ] || err "${f##*/} needs $dep, which is not in $dir" ;;
+			lib*-goffmpeg*.so*) [ -f "$dir/$dep" ] || err "${f##*/} needs $dep, which is not in $dir" ;;
 			*)
 				case $target in
 				linux_*) allowed='^(libc\.so\.6|libm\.so\.6|libpthread\.so\.0|libdl\.so\.2|libssl\.so\.3|libcrypto\.so\.3|ld-linux-[a-z0-9_-]+\.so\.[0-9])$' ;;
@@ -143,7 +147,7 @@ done
 # Linux: no library may need a glibc newer than the supported floor (#44).
 case $target in
 linux_*)
-	OBJDUMP="$OBJDUMP" sh "$(dirname "$0")/check-glibc.sh" "${GLIBC_FLOOR:?GLIBC_FLOOR is not set}" "$dir"/lib*-goffmpeg.so.* || fail=1
+	OBJDUMP="$OBJDUMP" sh "$(dirname "$0")/check-glibc.sh" "${GLIBC_FLOOR:?GLIBC_FLOOR is not set}" "$dir"/lib*-goffmpeg*.so.* || fail=1
 	;;
 esac
 

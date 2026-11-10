@@ -67,11 +67,12 @@ jobs:
       - name: Test (cgo)
         run: go test -race -count=1 ./...
 
-      # The audio-only build (goffmpeg_novideo): audio decodes, video never
-      # arrives, and nothing of libswscale is linked. Only its own tests run
-      # under the tag; the rest expect video.
+      # The audio-only build (goffmpeg_novideo), which links the audio codec
+      # set (#41): MP3 and WAV, no video, no libswscale. Only its own tests and
+      # the codec-set tests run under the tag; the rest expect video. Against a
+      # goffmpeg-libs older than the sets, the set tests skip.
       - name: Test (cgo, audio only)
-        run: go test -count=1 -tags goffmpeg_novideo -run 'NoVideo' .
+        run: go test -count=1 -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg' .
 
       # purego dlopens libgoffmpeg rather than linking it, and a fresh checkout
       # has no dist/ (it is gitignored). Stage the shared library out of the
@@ -177,10 +178,14 @@ jobs:
           echo "::notice::using NDK $NDK"
 
       # The shared libraries apps ship (Player ADR-0037 D3, goffmpeg-libs#14),
-      # the only FFmpeg build since #45. dist ends with check-shared, which
-      # fails on a name or dependency the loader would not resolve.
+      # in both codec sets (#41): media in shared/, audio in shared-audio/.
+      # dist checks the configured components against the set's lists
+      # (check-components), and ends with check-shared, which fails on a name
+      # or dependency the loader would not resolve.
       - name: Build ${{ matrix.target }}
-        run: make dist TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
+        run: |
+          make dist TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK"
+          make dist TARGET=${{ matrix.target }} SET=audio ANDROID_NDK="$ANDROID_NDK"
 
       # Decodes a file through the shared libraries alone, where this machine
       # can run the target: macOS natively, the simulator slice in a booted
@@ -194,7 +199,9 @@ jobs:
             darwin_amd64) run=auto ;;
             *) run=0 ;;
           esac
-          make smoke-shared TARGET=${{ matrix.target }} ANDROID_NDK="$ANDROID_NDK" SMOKE_RUN=$run
+          for set in media audio; do
+            make smoke-shared TARGET=${{ matrix.target }} SET=$set ANDROID_NDK="$ANDROID_NDK" SMOKE_RUN=$run
+          done
 
       # Desktop only: purego dlopens this, and the mobile targets configure
       # FFmpeg with --disable-avdevice and have no purego consumer.
@@ -253,9 +260,10 @@ jobs:
           unset CGO_CFLAGS CGO_LDFLAGS
           # The binary must load FFmpeg as shared libraries: import each one by
           # the name its loader looks for, and define none of FFmpeg itself.
-          # The audio-only build must not import libswscale, or a package
-          # without it would not load (#40). sync-libs wrote the cgo link
-          # files this links with (scripts/gen-libav.sh).
+          # The audio-only build links the audio set from shared-audio/, and
+          # nothing of the media set, or a package carrying one set would not
+          # load (#40, #41). sync-libs wrote the cgo link files this links
+          # with (scripts/gen-libav.sh).
           case "${{ matrix.target }}" in
             android_*) export READELF="$BIN/llvm-readelf" NM="$BIN/llvm-nm" ;;
           esac
@@ -263,7 +271,7 @@ jobs:
           CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link.test" ${TAGS:+-tags $TAGS} .
           scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link.test" "$SHARED"
           CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link-novideo.test" -tags "${TAGS:+$TAGS,}goffmpeg_novideo" .
-          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link-novideo.test" "$SHARED" novideo
+          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link-novideo.test" "$SHARED-audio" audio
           git checkout go.mod
 
       # This runner is darwin_arm64, so run the suite against the libraries
@@ -282,7 +290,7 @@ jobs:
           unset CGO_CFLAGS CGO_LDFLAGS
           go test -race -count=1 ./...
           go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
-          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|TestLinksSharedFFmpeg' .
+          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg' .
           CGO_ENABLED=0 go test -count=1 ./...
 
       - name: Restore go.mod
@@ -346,7 +354,9 @@ jobs:
       # check-shared also refuses a DLL that imports one Windows does not ship.
       - name: Build ${{ matrix.target }}
         if: matrix.target != 'linux_amd64'
-        run: make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
+        run: |
+          make dist TARGET=${{ matrix.target }} NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
+          make dist TARGET=${{ matrix.target }} SET=audio NPROC="$(nproc)" LLVM_MINGW=/opt/llvm-mingw
 
       # Linux is built on Ubuntu 22.04, whose glibc 2.35 is the oldest goffmpeg
       # supports (#44): a shared library needs at least the glibc it was built
@@ -355,12 +365,17 @@ jobs:
       # test runs there too, so the libraries are shown to load on the floor.
       - name: Build ${{ matrix.target }} on Ubuntu 22.04
         if: matrix.target == 'linux_amd64'
-        run: make linux-docker TARGET=linux_amd64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
+        run: |
+          make linux-docker TARGET=linux_amd64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
+          make linux-docker TARGET=linux_amd64 DOCKER_GOALS="dist smoke-shared SET=audio SMOKE_RUN=1"
 
       # The Windows DLLs only link here; windows-test runs them on Windows.
       - name: Smoke-test the shared libraries ${{ matrix.target }}
         if: startsWith(matrix.target, 'windows_')
-        run: make smoke-shared TARGET=${{ matrix.target }} LLVM_MINGW=/opt/llvm-mingw SMOKE_RUN=0
+        run: |
+          for set in media audio; do
+            make smoke-shared TARGET=${{ matrix.target }} SET=$set LLVM_MINGW=/opt/llvm-mingw SMOKE_RUN=0
+          done
 
       # The Windows legs test this bridge on a real Windows runner. Linux's was
       # built on Ubuntu 22.04 above.
@@ -422,12 +437,12 @@ jobs:
           esac
           unset CGO_CFLAGS CGO_LDFLAGS
           # As in the apple-android link check: shared FFmpeg, by the names the
-          # loader looks for, and no libswscale in the audio-only build (#40).
+          # loader looks for, and the audio set alone in the audio-only build.
           SHARED="$RUNNER_TEMP/libs/${{ matrix.target }}/shared"
           CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link.test" .
           scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link.test" "$SHARED"
           CGO_ENABLED=1 go test -c -o "$RUNNER_TEMP/link-novideo.test" -tags goffmpeg_novideo .
-          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link-novideo.test" "$SHARED" novideo
+          scripts/check-links.sh ${{ matrix.target }} "$RUNNER_TEMP/link-novideo.test" "$SHARED-audio" audio
           git checkout go.mod
 
       # This runner is the linux/amd64 target, so run the suite rather than
@@ -458,7 +473,7 @@ jobs:
           scripts/linux-floor.sh '
             go test -race -count=1 ./...
             go test -count=1 -v -run "TestLinksSharedFFmpeg|TestVideoImportsSwscale" .
-            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|TestLinksSharedFFmpeg" .'
+            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg" .'
 
       - name: Restore go.mod
         if: always() && matrix.target == 'linux_amd64'
@@ -592,11 +607,17 @@ jobs:
           if (-not (Test-Path $shared)) { throw "no shared/ in $dir" }
           Write-Output "::notice::FFmpeg DLLs from $shared"
           Add-Content -Path $env:GITHUB_PATH -Value $shared
+          # The audio codec set (#41), for the audio-only tests. Its DLLs are
+          # named -goffmpeg-audio, so both sets can be on PATH at once.
+          $audio = Join-Path $dir "shared-audio"
+          if (Test-Path $audio) {
+            Write-Output "::notice::audio-set DLLs from $audio"
+            Add-Content -Path $env:GITHUB_PATH -Value $audio
+          }
 
       # The shared FFmpeg DLLs, cross-built on Linux, run on Windows: they
-      # load, find each other beside the executable, and decode a file. Only
-      # when the matrix ran, since the published modules carry no shared/
-      # until goffmpeg-libs#14 is released.
+      # load, find each other beside the executable, and decode a file, for
+      # both codec sets. Only when the matrix ran: it tests the DLLs just built.
       - name: Smoke-test the shared libraries
         if: needs.linux-windows.result == 'success'
         shell: bash
@@ -608,6 +629,8 @@ jobs:
           tmp=$(cygpath -u "$RUNNER_TEMP")
           sh scripts/smoke-shared.sh ${{ matrix.target }} "$tmp/libs/${{ matrix.target }}/shared" \
             "$tmp/smoke" "$PWD/testdata/sample.mp4"
+          SMOKE_SET=audio sh scripts/smoke-shared.sh ${{ matrix.target }} "$tmp/libs/${{ matrix.target }}/shared-audio" \
+            "$tmp/smoke-audio" "$PWD/testdata/sample_cover.mp3"
 
       - name: Test (cgo)
         shell: cmd
@@ -616,6 +639,14 @@ jobs:
           CC: ${{ matrix.cc }}
           GOFLAGS: -mod=mod
         run: go test -count=1 -v ./...
+
+      - name: Test (cgo, audio only)
+        shell: cmd
+        env:
+          CGO_ENABLED: "1"
+          CC: ${{ matrix.cc }}
+          GOFLAGS: -mod=mod
+        run: go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg" .
 
       - name: Test (purego)
         shell: cmd
@@ -649,7 +680,9 @@ jobs:
       # The hosted runner has no v4l2 device, so the capture tests skip here;
       # the reopen test below says so in the log rather than passing silently.
       - name: Build linux_arm64 on Ubuntu 22.04
-        run: make linux-docker TARGET=linux_arm64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
+        run: |
+          make linux-docker TARGET=linux_arm64 DOCKER_GOALS="dist smoke-shared bridge-shared SMOKE_RUN=1"
+          make linux-docker TARGET=linux_arm64 DOCKER_GOALS="dist smoke-shared SET=audio SMOKE_RUN=1"
 
       # Without this the tests below link the *published* companion module, not
       # the FFmpeg this job just built — libav_linux_arm64.go blank-imports
@@ -696,7 +729,7 @@ jobs:
           scripts/linux-floor.sh '
             go test -race -count=1 ./...
             go test -count=1 -v -run "TestLinksSharedFFmpeg|TestVideoImportsSwscale" .
-            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|TestLinksSharedFFmpeg" .'
+            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg" .'
 
       - name: Test (purego)
         run: scripts/linux-floor.sh 'CGO_ENABLED=0 go test -count=1 ./...'

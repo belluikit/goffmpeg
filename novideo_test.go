@@ -9,10 +9,15 @@ import (
 	"testing"
 )
 
+// testCodecSet is the codec set this test build links (#41): goffmpeg_novideo
+// links the audio set. missing_video_test.go says "media".
+const testCodecSet = "audio"
+
 // An audio-only build decodes a file's audio and never its video: no video
-// stream is opened, no frame arrives, and GetRGBA says why.
+// stream is opened, no frame arrives, and GetRGBA says why. The MP3 carries a
+// cover picture, which no build decodes as video.
 func TestNoVideoDecodesAudioOnly(t *testing.T) {
-	dec, err := Open("testdata/sample.mp4") // H.264 video and AAC audio
+	dec, err := Open("testdata/sample_cover.mp3") // MP3 audio and a cover picture
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,37 +51,52 @@ func TestNoVideoDecodesAudioOnly(t *testing.T) {
 	}
 }
 
-// The stream an audio-only build skips is named, so an app can tell "this
-// file has video this build doesn't decode" from "this file has no video"
-// (#41). The audio, which it does decode, names nothing.
-func TestNoVideoNamesTheVideoItSkips(t *testing.T) {
-	dec, err := Open("testdata/sample.mp4") // H.264 video and AAC audio
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dec.Close()
-	if got := dec.VideoInfo().MissingDecoder; got != "h264" {
-		t.Errorf("VideoInfo().MissingDecoder = %q, want h264", got)
-	}
-	if got := dec.AudioInfo().MissingDecoder; got != "" {
-		t.Errorf("AudioInfo().MissingDecoder = %q, want empty: the audio decodes", got)
-	}
-}
-
 // An input with nothing an audio-only build decodes, a video with no audio,
-// fails to open with ErrNoDecoder naming the codec, instead of opening and
-// yielding nothing (#41).
+// fails to open with a clear error instead of opening and yielding nothing
+// (#41). The audio set has no MP4 demuxer, so it can't read the file at all:
+// ErrUnrecognizedInput. A goffmpeg-libs older than the sets reads it, and has
+// no video decoder under the tag: ErrNoDecoder, naming the codec.
 func TestNoVideoVideoOnlyInputFails(t *testing.T) {
 	dec, err := Open("testdata/sample_video_cover.mp4") // video and cover art, no audio
 	if err == nil {
 		dec.Close()
 		t.Fatal("a video-only file opened in an audio-only build")
 	}
-	if !errors.Is(err, ErrNoDecoder) {
-		t.Fatalf("%v, want ErrNoDecoder", err)
+	switch {
+	case errors.Is(err, ErrUnrecognizedInput):
+	case errors.Is(err, ErrNoDecoder):
+		if !strings.Contains(err.Error(), "video ") {
+			t.Errorf("%q doesn't name the video codec", err)
+		}
+	default:
+		t.Fatalf("%v, want ErrUnrecognizedInput or ErrNoDecoder", err)
 	}
-	if !strings.Contains(err.Error(), "video ") {
-		t.Errorf("%q doesn't name the video codec", err)
+}
+
+// The audio set reads no MP4 (#41): opening one says the build has no demuxer
+// for it, which is what an app shows a user who picks a file it can't play.
+func TestAudioSetRefusesMP4(t *testing.T) {
+	requireCodecSets(t)
+	dec, err := Open("testdata/sample.mp4")
+	if err == nil {
+		dec.Close()
+		t.Fatal("the audio set opened an MP4")
+	}
+	if !errors.Is(err, ErrUnrecognizedInput) {
+		t.Errorf("%v, want ErrUnrecognizedInput", err)
+	}
+}
+
+// The audio set has no libavdevice, so an audio-only build has no capture:
+// OpenDevice says so rather than failing some other way.
+func TestNoVideoHasNoCapture(t *testing.T) {
+	dec, err := OpenDevice("avfoundation", "0", "")
+	if err == nil {
+		dec.Close()
+		t.Fatal("an audio-only build opened a capture device")
+	}
+	if !strings.Contains(err.Error(), "without libavdevice") {
+		t.Errorf("%v, want the build-without-libavdevice error", err)
 	}
 }
 
@@ -100,5 +120,21 @@ func TestNoVideoImportsNoSwscale(t *testing.T) {
 	}
 	if got["swscale"] {
 		t.Error("an audio-only build imports libswscale-goffmpeg")
+	}
+}
+
+// The tag links the audio set (#41), whose libraries carry -goffmpeg-audio,
+// and nothing of the media set: no libavdevice either.
+func TestNoVideoLinksTheAudioSet(t *testing.T) {
+	requireCodecSets(t)
+	got := requireSharedFFmpeg(t)
+	if !got["set:audio"] {
+		t.Error("an audio-only build doesn't import the audio set's -goffmpeg-audio libraries")
+	}
+	if got["set:media"] {
+		t.Error("an audio-only build imports the media set's libraries")
+	}
+	if got["avdevice"] {
+		t.Error("an audio-only build imports libavdevice")
 	}
 }

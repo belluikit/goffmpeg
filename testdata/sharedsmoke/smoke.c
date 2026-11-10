@@ -2,6 +2,9 @@
 // alone (Makefile: smoke-shared). It calls into every library so the
 // executable needs each one, and checks that the libavutil it loaded is the
 // shared build, so a run against some other FFmpeg fails instead of passing.
+//
+// It decodes video, or with SMOKE_AUDIO audio: the audio-only codec set (#41)
+// has no video decoder and no libswscale.
 #include <stdio.h>
 #include <string.h>
 
@@ -9,7 +12,9 @@
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libswresample/swresample.h>
+#ifndef SMOKE_AUDIO
 #include <libswscale/swscale.h>
+#endif
 #ifdef SMOKE_AVDEVICE
 #include <libavdevice/avdevice.h>
 #endif
@@ -24,9 +29,11 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "libavutil is not the shared build: %s\n", conf);
 		return 1;
 	}
-	printf("avutil %u, swresample %u, swscale %u, avcodec %u, avformat %u",
-	       avutil_version(), swresample_version(), swscale_version(),
-	       avcodec_version(), avformat_version());
+	printf("avutil %u, swresample %u, avcodec %u, avformat %u",
+	       avutil_version(), swresample_version(), avcodec_version(), avformat_version());
+#ifndef SMOKE_AUDIO
+	printf(", swscale %u", swscale_version());
+#endif
 #ifdef SMOKE_AVDEVICE
 	avdevice_register_all();
 	printf(", avdevice %u", avdevice_version());
@@ -43,10 +50,15 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "stream info: %s\n", av_err2str(err));
 		return 1;
 	}
+#ifdef SMOKE_AUDIO
+	const enum AVMediaType want = AVMEDIA_TYPE_AUDIO;
+#else
+	const enum AVMediaType want = AVMEDIA_TYPE_VIDEO;
+#endif
 	const AVCodec *codec = NULL;
-	int si = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+	int si = av_find_best_stream(fmt, want, -1, -1, &codec, 0);
 	if (si < 0) {
-		fprintf(stderr, "no video stream: %s\n", av_err2str(si));
+		fprintf(stderr, "no %s stream: %s\n", av_get_media_type_string(want), av_err2str(si));
 		return 1;
 	}
 	AVCodecContext *dec = avcodec_alloc_context3(codec);
@@ -65,7 +77,10 @@ int main(int argc, char **argv) {
 				frames++;
 		av_packet_unref(pkt);
 	}
-	printf("decoded %d %s frames, %dx%d\n", frames, codec->name, dec->width, dec->height);
+	printf("decoded %d %s frames", frames, codec->name);
+	if (want == AVMEDIA_TYPE_VIDEO)
+		printf(", %dx%d", dec->width, dec->height);
+	printf("\n");
 
 	av_frame_free(&frame);
 	av_packet_free(&pkt);
