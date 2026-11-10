@@ -31,7 +31,8 @@ static int64_t goffmpeg_avio_seek(void *opaque, int64_t offset, int whence) {
     return r;
 }
 
-int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const char *options) {
+int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const char *options, int *averr) {
+    if (averr) *averr = 0;
     memset(d, 0, sizeof(Decoder));
     d->v_stream_idx = -1;
     d->a_stream_idx = -1;
@@ -70,10 +71,13 @@ int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const cha
     // leaves the AVIOContext for decoder_close to reclaim.
     rc = avformat_open_input(&d->fmt_ctx, NULL, NULL, &opts);
     av_dict_free(&opts);
-    if (rc < 0) return -1;
+    if (rc < 0) {
+        if (averr) *averr = rc;
+        return -1;
+    }
     return decoder_setup_streams(d);
 }
 
 int decoder_open_reader(Decoder *d, int64_t handle, int seekable) {
-    return decoder_open_reader_opts(d, handle, seekable, NULL);
+    return decoder_open_reader_opts(d, handle, seekable, NULL, NULL);
 }

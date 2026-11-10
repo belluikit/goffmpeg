@@ -26,6 +26,9 @@ type cgoDecoder struct {
 	// audio holds the caller's channel and rate requests, so rebuilding the
 	// resampler for one keeps the other.
 	audio audioRequest
+	// missing is decoder_missing's answer at open, video then audio: the
+	// codecs of streams this build could not decode.
+	missing [2]string
 
 	// mu orders Interrupt against Close, which frees the flag Interrupt sets.
 	// Nothing else takes it: Interrupt is the only method that may run
@@ -43,24 +46,29 @@ func openDecoder(url, options string) (IDecoder, error) {
 	defer C.free(unsafe.Pointer(cUrl))
 	defer C.free(unsafe.Pointer(cOpts))
 
-	res := C.decoder_open_opts(&d.d, cUrl, cOpts)
+	var averr C.int
+	res := C.decoder_open_opts_err(&d.d, cUrl, cOpts, &averr)
+	d.missing = cMissing(&d.d)
 	if res != 0 {
 		// A failed open can leave the interrupt flag, and a format context
 		// whose streams could not be read, behind.
 		C.decoder_close(&d.d)
-		return nil, openError(res, options)
+		return nil, openError(fmt.Sprintf("%q", url), int(res), int(averr), options, d.missing)
 	}
 	return d, nil
 }
 
-// openError turns a bridge open code into a Go error. -8 is the one worth
-// naming: it means the options string itself would not parse, which is a
-// caller mistake rather than anything about the media.
-func openError(res C.int, options string) error {
-	if res == -8 {
-		return fmt.Errorf("goffmpeg: malformed open options %q", options)
+// cMissing reads decoder_missing for video and audio. It has to run before
+// decoder_close, which frees the format context the names come from.
+func cMissing(d *C.Decoder) [2]string {
+	var m [2]string
+	if s := C.decoder_missing(d, 1); s != nil {
+		m[0] = C.GoString(s)
 	}
-	return fmt.Errorf("failed to open decoder: %d", int(res))
+	if s := C.decoder_missing(d, 2); s != nil {
+		m[1] = C.GoString(s)
+	}
+	return m
 }
 
 func openDeviceDecoder(format, url, options string) (IDecoder, error) {
@@ -74,8 +82,12 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 
 	var averr C.int
 	res := C.decoder_open_device_err(&d.d, cFormat, cURL, cOpts, &averr)
+	d.missing = cMissing(&d.d)
 	if res != 0 {
 		C.decoder_close(&d.d)
+		if res == -9 {
+			return nil, openError(fmt.Sprintf("device %q %q", format, url), int(res), 0, options, d.missing)
+		}
 		return nil, openDeviceError(format, url, int(res), int(averr))
 	}
 	return d, nil
@@ -151,13 +163,15 @@ func (d *cgoDecoder) VideoInfo() VideoInfo {
 	return VideoInfo{
 		Width:  int(d.d.width),
 		Height: int(d.d.height), Framerate: float64(d.d.framerate),
+		MissingDecoder: d.missing[0],
 	}
 }
 
 func (d *cgoDecoder) AudioInfo() AudioInfo {
 	return AudioInfo{
-		SampleRate: int(d.d.sample_rate),
-		Channels:   int(d.d.channels),
+		SampleRate:     int(d.d.sample_rate),
+		Channels:       int(d.d.channels),
+		MissingDecoder: d.missing[1],
 	}
 }
 
@@ -246,3 +260,7 @@ func (d *cgoDecoder) Seek(seconds float64) error {
 func (d *cgoDecoder) bridgeSeek(seconds float64) int {
 	return int(C.decoder_seek(&d.d, C.double(seconds)))
 }
+
+// missingDecoderSupported reports whether this backend can report missing
+// decoders (#41). The cgo build compiles the bridge, so it always can.
+func missingDecoderSupported() bool { return true }

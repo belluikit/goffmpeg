@@ -11,7 +11,6 @@ import "C"
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -155,14 +154,14 @@ func openReaderDecoder(r io.Reader, options string) (IDecoder, error) {
 
 	handle := registerReader(rs)
 	d := &cgoDecoder{handle: handle}
-	if res := C.decoder_open_reader_opts(&d.d, C.int64_t(handle), C.int(seekable), cOpts); res != 0 {
+	var averr C.int
+	res := C.decoder_open_reader_opts(&d.d, C.int64_t(handle), C.int(seekable), cOpts, &averr)
+	d.missing = cMissing(&d.d)
+	if res != 0 {
 		// decoder_open_reader_opts leaves the AVIOContext allocated on failure.
 		C.decoder_close(&d.d)
 		unregisterReader(handle)
-		if res == -8 {
-			return nil, fmt.Errorf("goffmpeg: malformed open options %q", options)
-		}
-		return nil, fmt.Errorf("goffmpeg: failed to open reader: %d", int(res))
+		return nil, openError("reader", int(res), int(averr), options, d.missing)
 	}
 	return d, nil
 }

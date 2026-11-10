@@ -69,7 +69,21 @@ int decoder_struct_size(void);
 
 // decoder_setup_streams is shared by every entry point below; it is exposed
 // (rather than static) so bridge_reader.c can reuse it.
+//
+// It opens a decoder for the best video and the best audio stream that this
+// build can decode, and leaves out a stream it has no decoder for: the input
+// still opens with the rest (#41). Only when it can decode neither does it
+// return GOFFMPEG_NO_DECODER, and so does every open below. decoder_missing
+// names what it could not decode, before decoder_close.
 int decoder_setup_streams(Decoder *d);
+#define GOFFMPEG_NO_DECODER -9
+
+// decoder_missing names the codec ("hevc", "aac") of the input's best video
+// (media 1) or audio (media 2) stream when this build could not open a decoder
+// for it, or returns NULL: there is no such stream, or it decodes. A build
+// with GOFFMPEG_NO_VIDEO names its video stream, which it never decodes. The
+// name is FFmpeg's, valid for the life of the process.
+const char *decoder_missing(Decoder *d, int media);
 
 // decoder_open_opts opens a file or URL with per-open demuxer and protocol
 // options: a comma-separated "key=value" list in the same shape
@@ -85,6 +99,12 @@ int decoder_setup_streams(Decoder *d);
 // string can be handed to both a URL and a local path. A malformed string
 // (something av_dict_parse_string cannot split) returns -8.
 int decoder_open_opts(Decoder *d, const char *url, const char *options);
+// decoder_open_opts_err is decoder_open_opts with the AVERROR reported: on a
+// -1 return (avformat_open_input failed) *averr is libav's code, which tells
+// "no demuxer in this build recognizes the input" (AVERROR_INVALIDDATA) from
+// "no such file". It is an out-param for the reason decoder_open_device_err's
+// is. *averr is 0 on success and on every other failure.
+int decoder_open_opts_err(Decoder *d, const char *url, const char *options, int *averr);
 // decoder_open is decoder_open_opts with no options.
 int decoder_open(Decoder *d, const char *url);
 // decoder_open_device opens a live capture device (e.g. format="avfoundation",
@@ -114,8 +134,9 @@ int decoder_open_device_err(Decoder *d, const char *format, const char *url,
 // decoder_open_reader_opts takes the same options string as
 // decoder_open_opts. analyzeduration and probesize matter more here than
 // anywhere else: a non-seekable stream is exactly where format probing
-// struggles, and raising them is the only remedy.
-int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const char *options);
+// struggles, and raising them is the only remedy. averr, when not NULL, is
+// set as decoder_open_opts_err sets it.
+int decoder_open_reader_opts(Decoder *d, int64_t handle, int seekable, const char *options, int *averr);
 int decoder_open_reader(Decoder *d, int64_t handle, int seekable);
 int decoder_seek(Decoder *d, double seconds);
 // decoder_interrupt makes FFmpeg abandon whatever blocking I/O d is in, and

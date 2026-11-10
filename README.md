@@ -184,9 +184,31 @@ module's `shared/` on `PATH` first. See [BUILDING.md](BUILDING.md#linking).
 `-tags goffmpeg_novideo` builds the cgo backend for audio alone. The bridge opens
 no video stream and never calls libswscale, and the binary doesn't load it, so
 an app ships without it (about 1.2 MB on android/arm64). A file with video still opens and plays its audio. No video frame
-arrives, `VideoInfo` reports no size, and `GetRGBA` returns `ErrVideoNotBuilt`.
-Camera capture needs video, so leave the tag off for it. The tag doesn't change
-the purego backend, which loads a prebuilt `libgoffmpeg` that has video.
+arrives, `VideoInfo` reports no size and names the video's codec in
+`MissingDecoder`, and `GetRGBA` returns `ErrVideoNotBuilt`. A file with only
+video fails to open with `ErrNoDecoder`. Camera capture needs video, so leave
+the tag off for it. The tag doesn't change the purego backend, which loads a
+prebuilt `libgoffmpeg` that has video.
+
+## When a build can't decode something
+
+A build decodes the codecs and reads the containers it was built with
+([BUILDING.md](BUILDING.md#what-is-in-the-build)). An input opens with the
+streams it can decode:
+
+- **One stream decodes, the other doesn't:** the input opens, and
+  `VideoInfo().MissingDecoder` or `AudioInfo().MissingDecoder` names the codec
+  it couldn't decode (`"hevc"`). The AAC audio of an MP4 whose video the build
+  can't decode still plays.
+- **No stream decodes:** the open fails with `ErrNoDecoder`, naming the codecs.
+- **No demuxer recognizes the input,** or it isn't media: the open fails with
+  `ErrUnrecognizedInput`, wrapping FFmpeg's `AVERROR_INVALIDDATA` as an
+  `AVError`. Any other open failure wraps FFmpeg's own code too: a missing file
+  is `AVError(-2)`, `ENOENT`.
+
+Under `CGO_ENABLED=0` this needs a `libgoffmpeg` that exports
+`decoder_missing` and `decoder_open_opts_err`; with an older one,
+`MissingDecoder` reads empty and an open failure carries only the bridge's code.
 
 ## Building FFmpeg yourself
 

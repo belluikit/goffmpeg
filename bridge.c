@@ -84,12 +84,35 @@ int decoder_setup_streams(Decoder *d) {
         }
     }
 
+    // A stream with no decoder in this build is left out, and the input still
+    // opens with what it can decode (#41): the AAC audio of an MP4 whose video
+    // a build cannot decode still plays. An input it can decode nothing of
+    // fails here, rather than opening and then yielding nothing.
+    // decoder_missing says which codecs those were.
+    if (!d->v_frame && !d->a_frame) return GOFFMPEG_NO_DECODER;
+
     if (d->fmt_ctx->duration != AV_NOPTS_VALUE) {
         d->duration = (double)d->fmt_ctx->duration / AV_TIME_BASE;
     }
 
     d->pkt = av_packet_alloc();
     return 0;
+}
+
+const char *decoder_missing(Decoder *d, int media) {
+    if (!d || !d->fmt_ctx) return NULL;
+    int idx;
+    if (media == 1) {
+        if (d->v_frame) return NULL;
+        idx = find_video_stream(d->fmt_ctx);
+    } else if (media == 2) {
+        if (d->a_frame) return NULL;
+        idx = av_find_best_stream(d->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    } else {
+        return NULL;
+    }
+    if (idx < 0) return NULL;
+    return avcodec_get_name(d->fmt_ctx->streams[idx]->codecpar->codec_id);
 }
 
 // decoder_set_audio_channels builds (or rebuilds) the resampler so decoded
@@ -164,6 +187,11 @@ static int decoder_interrupted(const Decoder *d) {
 }
 
 int decoder_open_opts(Decoder *d, const char *url, const char *options) {
+    return decoder_open_opts_err(d, url, options, NULL);
+}
+
+int decoder_open_opts_err(Decoder *d, const char *url, const char *options, int *averr) {
+    if (averr) *averr = 0;
     memset(d, 0, sizeof(Decoder));
     d->v_stream_idx = -1;
     d->a_stream_idx = -1;
@@ -185,7 +213,10 @@ int decoder_open_opts(Decoder *d, const char *url, const char *options) {
     }
     rc = avformat_open_input(&d->fmt_ctx, url, NULL, &opts);
     av_dict_free(&opts);
-    if (rc < 0) return -1;
+    if (rc < 0) {
+        if (averr) *averr = rc;
+        return -1;
+    }
 
     return decoder_setup_streams(d);
 }
