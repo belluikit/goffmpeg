@@ -69,8 +69,7 @@ jobs:
 
       # The audio-only build (goffmpeg_novideo), which links the audio codec
       # set (#41): MP3 and WAV, no video, no libswscale. Only its own tests and
-      # the codec-set tests run under the tag; the rest expect video. Against a
-      # goffmpeg-libs older than the sets, the set tests skip.
+      # the codec-set tests run under the tag; the rest expect video.
       - name: Test (cgo, audio only)
         run: go test -count=1 -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg' .
 

@@ -115,14 +115,12 @@ func requireSharedFFmpeg(t *testing.T) map[string]bool {
 // into the binary itself.
 func TestLinksSharedFFmpeg(t *testing.T) {
 	got := requireSharedFFmpeg(t)
-	// One codec set, and the one the build tag picks (#41). A goffmpeg-libs
-	// older than the sets has only the media set, which a goffmpeg_novideo
-	// build then links too.
+	// One codec set, and the one the build tag picks (#41).
 	if got["set:audio"] && got["set:media"] {
 		t.Error("the binary imports libraries of both codec sets")
 	}
-	if testCodecSet == "media" && !got["set:media"] {
-		t.Error("a build without goffmpeg_novideo doesn't import the media set's libraries")
+	if !got["set:"+testCodecSet] {
+		t.Errorf("the binary doesn't import the %s set's libraries", testCodecSet)
 	}
 	want := []string{"avformat", "avcodec", "swresample", "avutil"}
 	desktop := runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows"
