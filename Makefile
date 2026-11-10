@@ -451,8 +451,8 @@ linux-docker: check-src
 		-v "$(ROOT)":/work -v "$(FFMPEG_SRC)":/ffmpeg -w /work \
 		$(LINUX_IMAGE) bash -c '\
 			set -e; \
-			apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-				build-essential yasm nasm pkg-config libssl-dev make patch >/dev/null; \
+			sh scripts/apt-install.sh build-essential yasm nasm pkg-config libssl-dev make patch \
+				-- make cc nasm pkg-config patch; \
 			trap "chown -R $(shell id -u):$(shell id -g) /work/internal/libav/dist/$(TARGET) /work/internal/libav/build/$(TARGET)-* 2>/dev/null || true" EXIT; \
 			ldd --version | head -n 1; \
 			make $(DOCKER_GOALS) TARGET=$(TARGET) FFMPEG_SRC=/ffmpeg NPROC=$$(nproc)'

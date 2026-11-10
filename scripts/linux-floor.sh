@@ -10,6 +10,9 @@
 # host's Go version (GO_VERSION, default `go env GOVERSION`) from go.dev,
 # checked against its published SHA-256, plus gcc for cgo and -race.
 #
+# Run it from the checkout's top: the container installs its tools with
+# scripts/apt-install.sh, which retries a mirror mid-sync (#54).
+#
 # The checkout and $RUNNER_TEMP (or TMPDIR) are mounted at their own paths, so
 # a go.mod replace pointing into either resolves the same inside. The image's
 # glibc version is printed first, as the marker that the floor is what ran.
@@ -30,8 +33,7 @@ exec docker run --rm \
 	-v "$PWD:$PWD" -v "$tmp:$tmp" -w "$PWD" \
 	-e GOFLAGS=-buildvcs=false -e RUNNER_TEMP="$tmp" -e DEBIAN_FRONTEND=noninteractive \
 	"$image" bash -euo pipefail -c "
-		apt-get update -qq
-		apt-get install -y -qq --no-install-recommends ca-certificates curl gcc libc6-dev >/dev/null
+		sh scripts/apt-install.sh ca-certificates curl gcc libc6-dev -- curl gcc
 		tgz=$gover.linux-\$(dpkg --print-architecture).tar.gz
 		curl -fsSL --retry 5 -o /tmp/\$tgz https://dl.google.com/go/\$tgz
 		echo \"\$(curl -fsSL --retry 5 https://dl.google.com/go/\$tgz.sha256)  /tmp/\$tgz\" | sha256sum -c - >/dev/null
