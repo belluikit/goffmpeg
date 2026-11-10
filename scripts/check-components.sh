@@ -10,8 +10,13 @@
 # brought hevc, av1 and vp9 back. This is the test that fails when a set's
 # build carries a codec the set doesn't list.
 #
-# Prints each kind's list and fails on a difference, or on a header that
-# enables no decoder at all, which would be a read that found nothing.
+# The desktop media set has every codec (owner, #41), so its lists are a
+# floor: a kind named in AT_LEAST (space-separated, e.g. "DECODER DEMUXER") must
+# include its list rather than equal it, and MIN_DECODERS, when set, is the
+# fewest decoders the build may have. Kinds not named stay exact.
+#
+# Prints each kind's list (or count) and fails on a difference, or on a header
+# that enables no decoder at all, which would be a read that found nothing.
 set -eu
 
 dir=$1
@@ -38,6 +43,20 @@ for kind in DECODER DEMUXER PARSER HWACCEL INDEV; do
 	esac
 	got=$(enabled $kind)
 	want=$(printf '%s\n' $want | sed '/^$/d' | sort)
+	case " ${AT_LEAST:-} " in
+	*" $kind "*)
+		printf '%s\n' "$got" | sed '/^$/d' > "$tmp/got"
+		printf '%s\n' "$want" | sed '/^$/d' > "$tmp/want"
+		missing=$(comm -13 "$tmp/got" "$tmp/want")
+		if [ -z "$missing" ]; then
+			echo "  ${kind}s: $(printf '%s\n' "$got" | sed '/^$/d' | wc -l | tr -d ' '), the set's among them"
+		else
+			echo "check-components: ${kind}s lack what the set needs (#41): $(echo $missing)" >&2
+			fail=1
+		fi
+		continue
+		;;
+	esac
 	if [ "$got" = "$want" ]; then
 		echo "  ${kind}s: $(echo $got)"
 	else
@@ -52,4 +71,8 @@ for kind in DECODER DEMUXER PARSER HWACCEL INDEV; do
 	fi
 done
 [ -n "$(enabled DECODER)" ] || { echo "check-components: $header enables no decoder: the read found nothing" >&2; fail=1; }
+if [ -n "${MIN_DECODERS:-}" ]; then
+	n=$(enabled DECODER | wc -l | tr -d ' ')
+	[ "$n" -ge "$MIN_DECODERS" ] || { echo "check-components: $n decoders, fewer than the $MIN_DECODERS a build with every codec has (#41)" >&2; fail=1; }
+fi
 exit $fail
