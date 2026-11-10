@@ -54,29 +54,21 @@ func TestNoVideoDecodesAudioOnly(t *testing.T) {
 // An input with nothing an audio-only build decodes, a video with no audio,
 // fails to open with a clear error instead of opening and yielding nothing
 // (#41). The audio set has no MP4 demuxer, so it can't read the file at all:
-// ErrUnrecognizedInput. A goffmpeg-libs older than the sets reads it, and has
-// no video decoder under the tag: ErrNoDecoder, naming the codec.
+// ErrUnrecognizedInput.
 func TestNoVideoVideoOnlyInputFails(t *testing.T) {
 	dec, err := Open("testdata/sample_video_cover.mp4") // video and cover art, no audio
 	if err == nil {
 		dec.Close()
 		t.Fatal("a video-only file opened in an audio-only build")
 	}
-	switch {
-	case errors.Is(err, ErrUnrecognizedInput):
-	case errors.Is(err, ErrNoDecoder):
-		if !strings.Contains(err.Error(), "video ") {
-			t.Errorf("%q doesn't name the video codec", err)
-		}
-	default:
-		t.Fatalf("%v, want ErrUnrecognizedInput or ErrNoDecoder", err)
+	if !errors.Is(err, ErrUnrecognizedInput) {
+		t.Fatalf("%v, want ErrUnrecognizedInput", err)
 	}
 }
 
 // The audio set reads no MP4 (#41): opening one says the build has no demuxer
 // for it, which is what an app shows a user who picks a file it can't play.
 func TestAudioSetRefusesMP4(t *testing.T) {
-	requireCodecSets(t)
 	dec, err := Open("testdata/sample.mp4")
 	if err == nil {
 		dec.Close()
@@ -89,7 +81,6 @@ func TestAudioSetRefusesMP4(t *testing.T) {
 
 // Nor HLS: the playlist is refused as a format the build doesn't read.
 func TestAudioSetRefusesHLS(t *testing.T) {
-	requireCodecSets(t)
 	dec, err := Open("testdata/hls/stream.m3u8")
 	if err == nil {
 		dec.Close()
@@ -139,7 +130,6 @@ func TestNoVideoImportsNoSwscale(t *testing.T) {
 // The tag links the audio set (#41), whose libraries carry -goffmpeg-audio,
 // and nothing of the media set: no libavdevice either.
 func TestNoVideoLinksTheAudioSet(t *testing.T) {
-	requireCodecSets(t)
 	got := requireSharedFFmpeg(t)
 	if !got["set:audio"] {
 		t.Error("an audio-only build doesn't import the audio set's -goffmpeg-audio libraries")

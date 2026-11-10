@@ -10,8 +10,7 @@ import (
 )
 
 // requireMissingDecoderSupport skips under CGO_ENABLED=0 when the loaded
-// libgoffmpeg predates #41's exports, as the published one does until a
-// goffmpeg-libs release carries them.
+// libgoffmpeg predates #41's exports: one from goffmpeg-libs before v0.6.0.
 func requireMissingDecoderSupport(t *testing.T) {
 	t.Helper()
 	if !missingDecoderSupported() {

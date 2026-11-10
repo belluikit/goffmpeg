@@ -9,7 +9,6 @@ import "testing"
 // and plays its AAC audio.
 func TestMediaSetNamesHEVCAndPlaysAudio(t *testing.T) {
 	requireMissingDecoderSupport(t)
-	requireCodecSets(t)
 	dec, err := Open("testdata/sample_hevc.mp4") // HEVC video, AAC audio
 	if err != nil {
 		t.Fatal(err)
