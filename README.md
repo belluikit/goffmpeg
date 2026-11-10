@@ -181,22 +181,23 @@ module's `shared/` on `PATH` first. See [BUILDING.md](BUILDING.md#linking).
 
 ## Formats
 
-goffmpeg's FFmpeg decodes what apps play, in two codec sets (#41):
+goffmpeg's FFmpeg comes in two codec sets (#41):
 
 | Set | Plays | Linked by |
 |---|---|---|
-| **media** | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`) and HLS with H.264 video and AAC audio; on desktop, webcam capture | default |
-| **audio** | MP3 and WAV | `-tags goffmpeg_novideo` |
+| **media**, desktop (macOS, Linux, Windows) | every format FFmpeg decodes; webcam capture | default |
+| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`) and HLS with H.264 video and AAC audio | default |
+| **audio**, every platform | MP3 and WAV | `-tags goffmpeg_novideo` |
 
-Anything else, such as FLAC, Ogg, HEVC or VP9, isn't built, and opening it
-says so ("When a build can't decode something", below). The exact lists are in
-[BUILDING.md](BUILDING.md#what-is-in-the-build).
+On the phones, anything else (FLAC, Ogg, HEVC, VP9 and so on) isn't built,
+and opening it says so ("When a build can't decode something", below). The
+exact lists are in [BUILDING.md](BUILDING.md#what-is-in-the-build).
 
 ## Audio only
 
 `-tags goffmpeg_novideo` builds the cgo backend against the audio set: MP3 and
-WAV, with no libswscale and no libavdevice, so an app ships 1.8 MB of FFmpeg
-where the media set is 4.9 MB (darwin_arm64). No video frame arrives,
+WAV, with no libswscale and no libavdevice, on every platform, so an app ships
+1.7 MB of FFmpeg where the phone media set is 4.7 MB (android_arm64). No video frame arrives,
 `GetRGBA` returns `ErrVideoNotBuilt`, and there's no capture: `OpenDevice`
 says the build has no libavdevice. An MP4 fails to open with
 `ErrUnrecognizedInput`. The tag doesn't change the purego backend, which loads

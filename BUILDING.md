@@ -282,40 +282,44 @@ darwin_arm64, linux_amd64, linux_arm64 and both Windows targets.
 
 ## What is in the build
 
-A **decode-only** FFmpeg in two **codec sets** (#41), each decoding only what
-apps play, so an app carries no codec it doesn't need, and none of the
-patent-encumbered ones unless it plays them. Encoders, muxers and avfilter are
-off in both: this library only ever decodes.
+A **decode-only** FFmpeg in two **codec sets** (#41). Encoders, muxers and
+avfilter are off in both: this library only ever decodes.
 
-| Set | Plays | Decoders | Demuxers | Where |
+| Set | Targets | Decoders | Demuxers | Where |
 |---|---|---|---|---|
-| **media** | MP3, WAV, MP4 and HLS with H.264 and AAC; webcams on desktop | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`; desktop also `rawvideo`, `mjpeg` | `mp3`, `wav`, `mov`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
-| **audio** | MP3, WAV | `mp3float`, the same PCM | `mp3`, `wav` | `shared-audio/`, `-goffmpeg-audio` |
+| **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has (478) | every one (360) | `shared/`, `-goffmpeg` |
+| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac` | `mp3`, `wav`, `mov`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
+| **audio** | every target | `mp3float`, the same PCM | `mp3`, `wav` | `shared-audio/`, `-goffmpeg-audio` |
 
-The audio set has no libswscale and no libavdevice. goffmpeg links it under the
-`goffmpeg_novideo` tag. On Apple, the media set enables VideoToolbox's H.264
-hwaccel and no other. On desktop, the media set has the one input device that
-reads cameras on each OS (`avfoundation`, `v4l2`, `dshow`) and no other: the
-rest aren't used, and `gdigrab`, Windows' screen capture, selects a BMP
-decoder. Each set has the parsers its formats need (`mpegaudio`,
-and `h264`, `aac` and `ac3` in the media set; `hls` selects the last), and no bitstream filter that isn't
-selected by something it keeps. Every protocol stays, so `http`, and `https`
-where the target has TLS, still open.
+On the phones the media set decodes only what apps play, so an app carries no
+codec it doesn't need, and none of the patent-encumbered ones unless it plays
+them. Desktop keeps every codec (the owner's choice on #41). The audio set has
+no libswscale and no libavdevice, on every target; goffmpeg links it under the
+`goffmpeg_novideo` tag.
 
-On darwin_arm64 the libraries come to 4.9 MB for the media set and 1.8 MB for
-the audio set, against 15.1 MB for the every-decoder build goffmpeg-libs
-published until v0.5.0. libavcodec alone is 2.0 MB and 0.4 MB, against 11.2 MB.
+On the phones, the media set enables VideoToolbox's H.264 hwaccel (iOS) and no
+other, has the parsers its formats need (`mpegaudio`, `h264`, `aac`, and `ac3`,
+which `hls` selects) and no bitstream filter that isn't selected by something
+it keeps. On desktop, the media set has every hwaccel, parser and filter, and
+one input device, the one that reads cameras on each OS (`avfoundation`,
+`v4l2`, `dshow`): the rest aren't used. Every protocol stays, so `http`, and
+`https` where the target has TLS, still open.
+
+On android_arm64 the libraries come to 4.7 MB for the media set and 1.7 MB for
+the audio set, against 14.4 MB for an every-codec build.
 
 **The sets are enforced, not only configured.** `configure` turns on whatever
 an enabled component selects, so a flag that asks for one decoder can bring
 others: VideoToolbox's HEVC, AV1 and VP9 hwaccels brought their decoders back,
 and the `eac3_core` and `dts2pts` filters the AC-3 and HEVC parsers. So every
-build starts with decoders, demuxers, parsers, bitstream filters, hwaccels and
-input devices off, and `make dist` runs `make check-components`
+trimmed build starts with decoders, demuxers, parsers, bitstream filters,
+hwaccels and input devices off, and `make dist` runs `make check-components`
 (`scripts/check-components.sh`), which fails the build when
-`config_components.h` enables anything but the set's lists. At run time,
+`config_components.h` enables anything but the set's lists. A desktop media
+build is held to having at least the phone media set's components and at least
+300 decoders, and exactly its one input device. At run time,
 `TestBuiltCodecsAreTheSet` lists the decoders and demuxers the loaded FFmpeg
-holds and compares them with the same lists.
+holds and checks them the same way.
 
 An input in a container a set leaves out fails to open with
 `ErrUnrecognizedInput`. A stream whose codec it leaves out is named in
