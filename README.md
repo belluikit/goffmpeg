@@ -185,10 +185,10 @@ goffmpeg's FFmpeg decodes what apps play, in two codec sets (#41):
 
 | Set | Plays | Linked by |
 |---|---|---|
-| **media** | MP3, WAV, and MP4 (`.mp4`, `.m4a`, `.mov`) with H.264 video and AAC audio; on desktop, webcam capture | default |
+| **media** | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`) and HLS with H.264 video and AAC audio; on desktop, webcam capture | default |
 | **audio** | MP3 and WAV | `-tags goffmpeg_novideo` |
 
-Anything else, such as FLAC, Ogg, HEVC, VP9 or HLS, isn't built, and opening it
+Anything else, such as FLAC, Ogg, HEVC or VP9, isn't built, and opening it
 says so ("When a build can't decode something", below). The exact lists are in
 [BUILDING.md](BUILDING.md#what-is-in-the-build).
 

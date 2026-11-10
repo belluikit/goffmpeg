@@ -192,6 +192,12 @@ ifeq ($(SET),media)
 	SET_DEMUXERS += mov
 	SET_DECODERS += h264 aac
 	SET_PARSERS  += h264 aac
+	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
+	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3
+	# demuxers and the ac3 parser, listed so check-components holds the set
+	# to them. They read containers; no decoder comes with them.
+	SET_DEMUXERS += hls mpegts aac ac3 eac3
+	SET_PARSERS  += ac3
 	SHARED_SUFFIX   := -goffmpeg
 	SHARED_DIR_NAME := shared
 else ifeq ($(SET),audio)
