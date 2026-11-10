@@ -87,6 +87,19 @@ func TestAudioSetRefusesMP4(t *testing.T) {
 	}
 }
 
+// Nor HLS: the playlist is refused as a format the build doesn't read.
+func TestAudioSetRefusesHLS(t *testing.T) {
+	requireCodecSets(t)
+	dec, err := Open("testdata/hls/stream.m3u8")
+	if err == nil {
+		dec.Close()
+		t.Fatal("the audio set opened an HLS playlist")
+	}
+	if !errors.Is(err, ErrUnrecognizedInput) {
+		t.Errorf("%v, want ErrUnrecognizedInput", err)
+	}
+}
+
 // The audio set has no libavdevice, so an audio-only build has no capture:
 // OpenDevice says so rather than failing some other way.
 func TestNoVideoHasNoCapture(t *testing.T) {

@@ -289,7 +289,7 @@ off in both: this library only ever decodes.
 
 | Set | Plays | Decoders | Demuxers | Where |
 |---|---|---|---|---|
-| **media** | MP3, WAV, MP4 with H.264 and AAC; webcams on desktop | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`; desktop also `rawvideo`, `mjpeg` | `mp3`, `wav`, `mov` | `shared/`, `-goffmpeg` |
+| **media** | MP3, WAV, MP4 and HLS with H.264 and AAC; webcams on desktop | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`; desktop also `rawvideo`, `mjpeg` | `mp3`, `wav`, `mov`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
 | **audio** | MP3, WAV | `mp3float`, the same PCM | `mp3`, `wav` | `shared-audio/`, `-goffmpeg-audio` |
 
 The audio set has no libswscale and no libavdevice. goffmpeg links it under the
@@ -298,7 +298,7 @@ hwaccel and no other. On desktop, the media set has the one input device that
 reads cameras on each OS (`avfoundation`, `v4l2`, `dshow`) and no other: the
 rest aren't used, and `gdigrab`, Windows' screen capture, selects a BMP
 decoder. Each set has the parsers its formats need (`mpegaudio`,
-and `h264` and `aac` in the media set), and no bitstream filter that isn't
+and `h264`, `aac` and `ac3` in the media set; `hls` selects the last), and no bitstream filter that isn't
 selected by something it keeps. Every protocol stays, so `http`, and `https`
 where the target has TLS, still open.
 

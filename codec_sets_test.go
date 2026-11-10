@@ -31,7 +31,8 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	wantDemuxers := []string{"mp3", "wav"}
 	if testCodecSet == "media" {
 		wantDecoders = append(wantDecoders, "aac", "h264")
-		wantDemuxers = append(wantDemuxers, "mov")
+		// mov for MP4; hls and mpegts for HLS, with what hls selects.
+		wantDemuxers = append(wantDemuxers, "mov", "hls", "mpegts", "aac", "ac3", "eac3")
 		switch runtime.GOOS {
 		case "darwin", "linux", "windows":
 			wantDecoders = append(wantDecoders, "mjpeg", "rawvideo") // webcams
