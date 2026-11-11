@@ -38,7 +38,6 @@ func TestMediaSetNamesUndecodableVideoAndPlaysAudio(t *testing.T) {
 // the HEVC video too.
 func TestMediaSetNamesHEVCAndPlaysAudio(t *testing.T) {
 	requireMissingDecoderSupport(t)
-	skipTrimmedDesktop(t)
 	dec, err := Open("testdata/sample_hevc.mp4") // HEVC video, AAC audio
 	if err != nil {
 		t.Fatal(err)

@@ -16,7 +16,6 @@ import (
 // to the same lists at configure time, mobile targets included; this is the
 // same check at run time, for the targets that run tests.
 func TestBuiltCodecsAreTheSet(t *testing.T) {
-	skipTrimmedDesktop(t)
 	wantDecoders := []string{"mp3float", "pcm_f32le", "pcm_f64le", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_u8"}
 	wantDemuxers := []string{"mp3", "wav"}
 	if testCodecSet == "media" {
@@ -60,16 +59,6 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	}
 }
 
-// skipTrimmedDesktop skips a desktop media-set test against goffmpeg-libs
-// v0.6.0, whose desktop media set was trimmed like the phones'. v0.7.0 has
-// every codec there (owner, #41); once go.mod requires it, this goes.
-func skipTrimmedDesktop(t *testing.T) {
-	t.Helper()
-	if decoders, _ := builtComponents(); everyCodec() && len(decoders) < 300 {
-		t.Skipf("this goffmpeg-libs' desktop media set is trimmed (%d decoders); v0.7.0 has every codec (#41)", len(decoders))
-	}
-}
-
 // everyCodec reports a build that links the desktop media set, which has
 // every codec FFmpeg has (owner, #41). The phone media set and the audio set
 // have only their lists.
@@ -86,7 +75,6 @@ func everyCodec() bool {
 // The desktop media set, which has every codec, plays it.
 func TestNoDecoderForADPCM(t *testing.T) {
 	requireMissingDecoderSupport(t)
-	skipTrimmedDesktop(t)
 	dec, err := Open("testdata/sample_adpcm.wav")
 	if everyCodec() {
 		if err != nil {
