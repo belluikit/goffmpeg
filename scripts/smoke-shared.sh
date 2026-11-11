@@ -39,7 +39,7 @@ ios_*|iossimulator_*)
 	done
 	;;
 linux_*)
-	set -- "$dir"/lib*.so.* -Wl,-rpath,"$dir"
+	set -- "$dir"/lib*.so -Wl,-rpath,"$dir"
 	;;
 android_*)
 	set -- "$dir"/lib*.so

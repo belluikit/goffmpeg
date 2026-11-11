@@ -80,7 +80,7 @@ func linkedFFmpeg(t *testing.T) map[string]bool {
 	got := map[string]bool{}
 	for _, lib := range imports {
 		// @rpath/libavcodec-goffmpeg.63.dylib, @rpath/libavcodec-goffmpeg.framework/libavcodec-goffmpeg,
-		// libavcodec-goffmpeg.so.63, avcodec-goffmpeg-63.dll
+		// libavcodec-goffmpeg-63.so, avcodec-goffmpeg-63.dll
 		base := path.Base(strings.ReplaceAll(lib, `\`, "/"))
 		name, rest, ok := strings.Cut(strings.ToLower(base), "-goffmpeg")
 		if !ok {
