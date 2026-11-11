@@ -13,10 +13,12 @@
 # package carries only those. (goffmpeg-libs v0.4.0 and v0.5.0 split libswscale
 # into libav_swscale.go instead; it is removed here.)
 #
-# The link names each library by file: Go module zips leave out symlinks, so
-# there is no libavcodec.dylib or libavcodec.so for -lavcodec to find. On Linux
-# that is -l:<soname>, because cgo refuses a path ending in .so.63 (Go's
-# cmd/go/internal/work/security.go accepts .so, not .so.N).
+# The link names each library by its path: Go module zips leave out symlinks,
+# so there is no libavcodec.dylib or libavcodec.so for -lavcodec to find. cgo
+# accepts a path that ends in .so but not one that ends in .so.63 (Go's
+# cmd/go/internal/work/security.go), so the Linux libraries are named
+# libavcodec-goffmpeg-63.so (the Makefile's SHARED_MAKEVARS). The -l:<file>
+# form that reached them before is refused from Go 1.27.4 and 1.26.11 (#59).
 #
 # macOS and Linux get an rpath to the set's directory in the module, so `go
 # run` and `go test` find the libraries in the module cache with no setup.
@@ -71,13 +73,11 @@ write() {
     while read -r name file_ _; do
         case "$target" in
             ios_* | iossimulator_*) link="$link${link:+ }-framework ${file_%.framework}" ;;
-            linux_*)                link="$link${link:+ }-l:$file_" ;;
             *)                      link="$link${link:+ }\${SRCDIR}/$dir/$file_" ;;
         esac
     done <<< "$libs"
     case "$target" in
         ios_* | iossimulator_*) search="-F\${SRCDIR}/$dir" ;;
-        linux_*)                search="-L\${SRCDIR}/$dir" ;;
     esac
     case "$target" in
         darwin_* | linux_*) rpath="-Wl,-rpath,\${SRCDIR}/$dir" ;;

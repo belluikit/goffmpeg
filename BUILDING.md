@@ -92,7 +92,7 @@ prefix is fine".
 |---|---|---|
 | `darwin_*` | `libavcodec-goffmpeg.63.dylib`, install name `@rpath/libavcodec-goffmpeg.63.dylib` | the executable's rpath |
 | `ios_arm64`, `iossimulator_arm64` | `libavcodec-goffmpeg.framework`, install name `@rpath/libavcodec-goffmpeg.framework/libavcodec-goffmpeg`, `Info.plist`, ad-hoc signed | `@executable_path/Frameworks`, where the app embeds and re-signs them |
-| `linux_*` | `libavcodec-goffmpeg.so.63`, soname the same | the executable's rpath |
+| `linux_*` | `libavcodec-goffmpeg-63.so`, soname the same | the executable's rpath |
 | `android_*` | `libavcodec-goffmpeg.so`, soname the same, 16KB-aligned | the APK's `lib/<abi>/` |
 | `windows_*` | `avcodec-goffmpeg-63.dll` and its import library `libavcodec-goffmpeg.dll.a` | the executable's directory |
 
@@ -124,10 +124,17 @@ would not load: that is why the sets are linked whole, rather than libswscale
 being left out of one link. (goffmpeg-libs v0.4.0 and v0.5.0 had one set and
 a `libav_swscale.go` instead.)
 
-Each library is linked by file, because a Go module zip leaves out the
+Each library is linked by its path, because a Go module zip leaves out the
 `libavcodec.dylib`- or `libavcodec.so`-style symlinks that `-lavcodec` would
-need. On Linux that is `-l:libavcodec-goffmpeg.so.63`: cgo refuses a path
-ending in `.so.63`.
+need. cgo accepts a path that ends in `.so` but not one that ends in `.so.63`.
+So the Linux libraries carry their major version before the suffix,
+`libavcodec-goffmpeg-63.so`, the way FFmpeg names its Windows DLLs. The
+Makefile sets this through FFmpeg's own naming variables (`SHARED_MAKEVARS`),
+so the soname and the other libraries' NEEDED entries agree with the file
+name. goffmpeg-libs v0.6.0 and v0.7.0 kept FFmpeg's `.so.63` names and
+linked them with `-l:libavcodec-goffmpeg.so.63`. Go 1.27.4 and 1.26.11 refuse
+that flag (#59), so those releases do not build for Linux with cgo on a
+current Go.
 
 | Target | Running from source (`go run`, `go test`) | A packaged app |
 |---|---|---|

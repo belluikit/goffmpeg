@@ -60,7 +60,7 @@ for n in $names; do
             f=$(one "lib$n$suffix.framework")
             echo "$n $f @rpath/$f/lib$n$suffix" ;;
         linux_*)
-            f=$(one "lib$n$suffix.so.*")
+            f=$(one "lib$n$suffix-[0-9]*.so")
             echo "$n $f $f" ;;
         android_*)
             f=$(one "lib$n$suffix.so")

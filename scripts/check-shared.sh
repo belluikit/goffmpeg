@@ -79,7 +79,7 @@ for l in $libs; do
 
 	linux_*|android_*)
 		case $target in
-		linux_*) set -- "$dir"/lib"$l"-*.so.* ;;
+		linux_*) set -- "$dir"/lib"$l"-*-[0-9]*.so ;;
 		*) set -- "$dir"/lib"$l"-*.so ;;
 		esac
 		f=$1
@@ -147,7 +147,7 @@ done
 # Linux: no library may need a glibc newer than the supported floor (#44).
 case $target in
 linux_*)
-	OBJDUMP="$OBJDUMP" sh "$(dirname "$0")/check-glibc.sh" "${GLIBC_FLOOR:?GLIBC_FLOOR is not set}" "$dir"/lib*-goffmpeg*.so.* || fail=1
+	OBJDUMP="$OBJDUMP" sh "$(dirname "$0")/check-glibc.sh" "${GLIBC_FLOOR:?GLIBC_FLOOR is not set}" "$dir"/lib*-goffmpeg*.so || fail=1
 	;;
 esac
 

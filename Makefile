@@ -293,6 +293,18 @@ endif
 ifeq ($(TARGET),windows_amd64)
 	SHARED_CONF += --extra-ldsoflags=-static-libgcc
 endif
+# Linux: each library is named libavcodec-goffmpeg-63.so, with the major
+# version before the .so, and its soname is the same. cgo cannot link FFmpeg's
+# default name, .so.63: it refuses a path ending in .so.63, and from Go 1.27.4
+# and 1.26.11 the -l:<file> form too (#59). These are FFmpeg's own naming
+# variables, set the way its Windows build sets them (avcodec-63.dll). So the
+# soname follows from the one name, and so does the NEEDED entry each other
+# library records for it. With no install links, each library is installed
+# once, under that name.
+ifneq ($(filter linux_%,$(TARGET)),)
+	SHARED_MAKEVARS = 'SLIBNAME_WITH_MAJOR=$$(SLIBPREF)$$(FULLNAME)-$$(LIBMAJOR)$$(SLIBSUF)' \
+		'SLIB_INSTALL_NAME=$$(SLIBNAME_WITH_MAJOR)' SLIB_INSTALL_LINKS=
+endif
 
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
         bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths \
@@ -343,6 +355,7 @@ print-config: check-src
 	@echo "TARGET      = $(TARGET)"
 	@echo "DIST_DIR    = $(DIST_DIR)"
 	@echo "FFMPEG_CONF = $(FFMPEG_CONF) $(SHARED_CONF)"
+	$(info MAKEVARS    = $(SHARED_MAKEVARS))
 
 # dist builds the shared libraries for TARGET into $(DIST_DIR)/shared, each
 # file named as the loader will look for it (its soname, install name or DLL
@@ -354,9 +367,9 @@ dist: check-src patch-src
 	@mkdir -p "$(SHARED_BUILD_DIR)"
 	cd "$(SHARED_BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
 	@$(MAKE) --no-print-directory check-components TARGET=$(TARGET) SET=$(SET)
-	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC)
+	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC) $(SHARED_MAKEVARS)
 	rm -rf "$(SHARED_STAGE)"
-	$(MAKE) -C "$(SHARED_BUILD_DIR)" install DESTDIR="$(SHARED_STAGE)"
+	$(MAKE) -C "$(SHARED_BUILD_DIR)" install DESTDIR="$(SHARED_STAGE)" $(SHARED_MAKEVARS)
 	IOS_MIN="$(IOS_MIN)" SHARED_SUFFIX="$(SHARED_SUFFIX)" \
 		scripts/stage-shared.sh "$(TARGET)" "$(SHARED_STAGE)/$(TARGET)" "$(SHARED_DIR)"
 	@$(MAKE) --no-print-directory check-shared TARGET=$(TARGET) SET=$(SET)
@@ -501,8 +514,6 @@ ifneq ($(filter darwin_%,$(TARGET)),)
 		-Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../shared
 endif
 ifneq ($(filter linux_%,$(TARGET)),)
-	# By soname with -l:, as the cgo link does (scripts/gen-libav.sh).
-	BRIDGE_FFMPEG = -L"$(SHARED_DIR)" $(addprefix -l:,$(notdir $(shell scripts/shared-libs.sh $(TARGET) "$(SHARED_DIR)" | awk '{print $$2}')))
 	BRIDGE_LDFLAGS = -Wl,-rpath,'$$ORIGIN:$$ORIGIN/../shared'
 	BRIDGE_SYSLIBS = -lpthread -lm
 endif
