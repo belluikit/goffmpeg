@@ -6,7 +6,6 @@ import (
 	"image"
 	"math"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -89,15 +88,6 @@ func psnr(a, b []byte) float64 {
 		return math.Inf(1)
 	}
 	return 10 * math.Log10(255*255/(se/float64(len(a))))
-}
-
-// onVM reports a macOS virtual machine, such as a GitHub runner.
-func onVM() bool {
-	if runtime.GOOS != "darwin" {
-		return false
-	}
-	out, err := exec.Command("sysctl", "-n", "kern.hv_vmm_present").Output()
-	return err == nil && strings.TrimSpace(string(out)) == "1"
 }
 
 // checkFrame fails unless got is want byte for byte, and returns the PSNR.
