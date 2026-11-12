@@ -278,6 +278,9 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 		"testdata/sample.mp4",           // 320x240, untagged
 		"testdata/yuv/bt709_tv.mp4",     // 64x64, BT.709 limited range
 		"testdata/yuv/smpte170m_pc.mp4", // 64x64, BT.601 full range (yuvj420p)
+		// MediaCodec refuses 64x64, so the tagged clips again at 320x240.
+		"testdata/yuv/bt709_tv_320.mp4",
+		"testdata/yuv/smpte170m_pc_320.mp4",
 	} {
 		sw := hwPlanes(t, path, "0")
 		hw := hwPlanes(t, path, "1")

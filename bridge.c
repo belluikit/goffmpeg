@@ -308,6 +308,18 @@ static int receive_video(Decoder *d) {
         return rc < 0 ? rc : 1;
     }
     int ret = receive(d->v_ctx, d->v_frame);
+    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC) {
+        // MediaCodec fills in a colour description the stream may not give:
+        // an untagged stream comes out tagged with the matrix MediaCodec
+        // guessed, so GetYCbCr would report a guess as stated (measured on the
+        // OPD2403). The stream's own tags, which the software decoder
+        // reports, are put back.
+        const AVCodecParameters *par = d->fmt_ctx->streams[d->v_stream_idx]->codecpar;
+        d->v_frame->colorspace = par->color_space;
+        d->v_frame->color_range = par->color_range;
+        d->v_frame->color_primaries = par->color_primaries;
+        d->v_frame->color_trc = par->color_trc;
+    }
     if (hw && hw->kind == HW_MEDIACODEC && !hw->confirmed) {
         if (ret == 1) {
             hw->confirmed = 1;

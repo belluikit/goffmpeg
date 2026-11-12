@@ -7,6 +7,10 @@ enc() { out=$1; size=$2; shift 2; ffmpeg -loglevel error -y -f lavfi -i "testsrc
 enc bt709_tv.mp4 64x64 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv
 enc smpte170m_pc.mp4 64x64 -pix_fmt yuv420p -colorspace smpte170m -color_range pc
 enc untagged_720.mp4 32x720 -pix_fmt yuv420p
+# The same two tags at a size MediaCodec configures, which 64x64 is not, so
+# the hardware path's colour tags are checked too (#65).
+enc bt709_tv_320.mp4 320x240 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv
+enc smpte170m_pc_320.mp4 320x240 -pix_fmt yuv420p -colorspace smpte170m -color_range pc
 enc yuv444.mp4 64x64 -pix_fmt yuv444p
 # A stream that changes resolution partway through: two MPEG-TS segments
 # concatenated byte for byte, 64x64 then 96x96.
