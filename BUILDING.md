@@ -223,7 +223,7 @@ that were skipping on `Err*Unavailable` should start running.
 | `darwin_amd64` | Xcode CLT, nasm | Cross-compiled from arm64 via `clang -arch x86_64` |
 | `ios_arm64` | Xcode iPhoneOS SDK | No avdevice; VideoToolbox hardware decode |
 | `iossimulator_arm64` | Xcode iPhoneSimulator SDK | Simulator slice |
-| `android_arm64` | Android NDK r26+ | MediaCodec via JNI, no TLS |
+| `android_arm64` | Android NDK r26+ | MediaCodec H.264 decoder via JNI, no TLS |
 | `android_arm` | Android NDK r26+ | armeabi-v7a, no TLS |
 | `android_amd64` | Android NDK r26+ | Emulator, no TLS |
 | `linux_amd64` | Docker (`make linux-docker`) | OpenSSL for https, v4l2 capture; glibc 2.35 and up |
@@ -295,7 +295,7 @@ avfilter are off in both: this library only ever decodes.
 | Set | Targets | Decoders | Demuxers | Where |
 |---|---|---|---|---|
 | **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has (478) | every one (360) | `shared/`, `-goffmpeg` |
-| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac` | `mp3`, `wav`, `mov`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
+| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`; on Android also `h264_mediacodec` | `mp3`, `wav`, `mov`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
 | **audio** | every target | `mp3float`, the same PCM | `mp3`, `wav` | `shared-audio/`, `-goffmpeg-audio` |
 
 On the phones the media set decodes only what apps play, so an app carries no
@@ -307,7 +307,11 @@ no libswscale and no libavdevice, on every target; goffmpeg links it under the
 On the phones, the media set enables VideoToolbox's H.264 hwaccel (iOS) and no
 other, has the parsers its formats need (`mpegaudio`, `h264`, `aac`, and `ac3`,
 which `hls` selects) and no bitstream filter that isn't selected by something
-it keeps. On desktop, the media set has every hwaccel, parser and filter, and
+it keeps. On Android it also has MediaCodec's H.264 decoder, `h264_mediacodec`
+(goffmpeg-libs#21), which selects the `h264_mp4toannexb` filter. MediaCodec is
+a decoder of its own rather than a hwaccel, and FFmpeg registers it after the
+software `h264`, so a lookup by codec ID still finds `h264`. goffmpeg opens
+neither hardware decoder yet (#65). On desktop, the media set has every hwaccel, parser and filter, and
 one input device, the one that reads cameras on each OS (`avfoundation`,
 `v4l2`, `dshow`): the rest aren't used. Every protocol stays, so `http`, and
 `https` where the target has TLS, still open.

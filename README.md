@@ -151,9 +151,9 @@ matching goffmpeg-libs module:
 | `darwin/arm64`, `darwin/amd64` | avfoundation capture; VideoToolbox hardware decode on arm64 |
 | `linux/amd64`, `linux/arm64` | v4l2 capture; OpenSSL for https |
 | `windows/amd64`, `windows/arm64` | dshow capture; Schannel for TLS |
-| `ios/arm64` | No avdevice; VideoToolbox hardware decode |
+| `ios/arm64` | No avdevice; VideoToolbox's H.264 hwaccel is built in, not yet used (#65) |
 | `ios/arm64` with `-tags iossimulator` | The iOS simulator. The tag is required: Go has no separate GOOS for it |
-| `android/arm64`, `android/arm`, `android/amd64` | No avdevice; MediaCodec hardware decode on arm64; **no TLS, so `https` URLs cannot open** |
+| `android/arm64`, `android/arm`, `android/amd64` | No avdevice; MediaCodec's H.264 decoder is built in, not yet used (#65); **no TLS, so `https` URLs cannot open** |
 
 If your shell exports `CGO_CFLAGS` or `CGO_LDFLAGS` (common with Homebrew),
 unset them when cross-compiling. Otherwise a cross build can pick up host

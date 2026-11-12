@@ -2,7 +2,8 @@
 
 package goffmpeg
 
-// Android arm64-v8a. MediaCodec provides hardware decode via JNI.
+// Android arm64-v8a. The media set has MediaCodec's H.264 decoder, reached
+// through JNI (#65).
 //
 // The FFmpeg headers are shared by every target and live in this module; only
 // the shared libraries differ, and those come from the companion module
