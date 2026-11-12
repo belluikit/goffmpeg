@@ -181,6 +181,10 @@ int decoder_set_audio_channels(Decoder *d, int channels);
 int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, <0=Error
 // decoder_get_rgba returns -8 in a build without video (GOFFMPEG_NO_VIDEO).
 int decoder_get_rgba(Decoder *d, uint8_t *buffer);
+int decoder_get_yuv(Decoder *d, uint8_t *y, int y_stride, uint8_t *u, uint8_t *v, int c_stride);
+int decoder_frame_colorspace(Decoder *d);
+int decoder_frame_full_range(Decoder *d);
+const char *decoder_frame_pix_fmt(Decoder *d);
 int decoder_get_audio(Decoder *d, uint8_t **buffer);
 void decoder_close(Decoder *d);
 // FFmpeg's av_log_set_level and av_log_get_level, for the purego backend.

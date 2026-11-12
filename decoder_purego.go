@@ -73,6 +73,12 @@ var (
 	// nil against a libgoffmpeg older than decoder_interrupt; Interrupt then
 	// does nothing.
 	decoder_interrupt func(d *cDecoder)
+	// nil against a libgoffmpeg older than #64; GetYCbCr then reports that
+	// the library cannot hand out planes, and GetRGBA still converts.
+	decoder_get_yuv          func(d *cDecoder, y *byte, yStride int32, u, v *byte, cStride int32) int32
+	decoder_frame_colorspace func(d *cDecoder) int32
+	decoder_frame_full_range func(d *cDecoder) int32
+	decoder_frame_pix_fmt    func(d *cDecoder) string
 
 	decoder_set_audio_channels func(d *cDecoder, channels int32) int32
 
@@ -179,6 +185,12 @@ func init() {
 		purego.RegisterLibFunc(&decoder_open_device_err, lib, "decoder_open_device_err")
 	}
 
+	if hasSymbol(lib, "decoder_get_yuv") {
+		purego.RegisterLibFunc(&decoder_get_yuv, lib, "decoder_get_yuv")
+		purego.RegisterLibFunc(&decoder_frame_colorspace, lib, "decoder_frame_colorspace")
+		purego.RegisterLibFunc(&decoder_frame_full_range, lib, "decoder_frame_full_range")
+		purego.RegisterLibFunc(&decoder_frame_pix_fmt, lib, "decoder_frame_pix_fmt")
+	}
 	if hasSymbol(lib, "decoder_interrupt") {
 		purego.RegisterLibFunc(&decoder_interrupt, lib, "decoder_interrupt")
 	}
@@ -430,6 +442,26 @@ func (d *puregoDecoder) GetRGBA(rgba *image.RGBA) error {
 	}
 	decoder_get_rgba(&d.d, &rgba.Pix[0])
 	return nil
+}
+
+var _ YCbCrDecoder = (*puregoDecoder)(nil)
+
+func (d *puregoDecoder) GetYCbCr(dst *image.YCbCr) (YCbCrInfo, error) {
+	if decoder_get_yuv == nil {
+		return YCbCrInfo{}, errYUVUnavailable
+	}
+	if d.d.v_frame == 0 {
+		return YCbCrInfo{}, yuvResult(int(decoder_get_yuv(&d.d, nil, 0, nil, nil, 0)), "")
+	}
+	w, h := int(d.d.width), int(d.d.height)
+	if err := checkYCbCr(dst, w, h); err != nil {
+		return YCbCrInfo{}, err
+	}
+	res := int(decoder_get_yuv(&d.d, &dst.Y[0], int32(dst.YStride), &dst.Cb[0], &dst.Cr[0], int32(dst.CStride)))
+	if res != 0 {
+		return YCbCrInfo{}, yuvResult(res, decoder_frame_pix_fmt(&d.d))
+	}
+	return colorInfo(int(decoder_frame_colorspace(&d.d)), decoder_frame_full_range(&d.d) != 0, h), nil
 }
 
 func (d *puregoDecoder) GetAudio() ([]byte, error) {
