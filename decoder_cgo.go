@@ -11,7 +11,6 @@ package goffmpeg
 */
 import "C"
 import (
-	"errors"
 	"fmt"
 	"image"
 	"sync"
@@ -186,13 +185,11 @@ func (d *cgoDecoder) Next() (MediaType, error) {
 func (d *cgoDecoder) bridgeNext() int { return int(C.decoder_next(&d.d)) }
 
 func (d *cgoDecoder) GetRGBA(rgba *image.RGBA) error {
-	if rgba == nil || len(rgba.Pix) == 0 {
-		return errors.New("invalid buffer")
+	info := d.VideoInfo()
+	if err := checkRGBABuffer(rgba, info); err != nil {
+		return err
 	}
-	if C.decoder_get_rgba(&d.d, (*C.uint8_t)(unsafe.Pointer(&rgba.Pix[0]))) == -8 {
-		return ErrVideoNotBuilt
-	}
-	return nil
+	return rgbaResult(int(C.decoder_get_rgba(&d.d, (*C.uint8_t)(unsafe.Pointer(&rgba.Pix[0])))), info)
 }
 
 func (d *cgoDecoder) GetAudio() ([]byte, error) {

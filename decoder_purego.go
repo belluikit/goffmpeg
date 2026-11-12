@@ -425,11 +425,11 @@ func (d *puregoDecoder) Next() (MediaType, error) {
 func (d *puregoDecoder) bridgeNext() int { return int(decoder_next(&d.d)) }
 
 func (d *puregoDecoder) GetRGBA(rgba *image.RGBA) error {
-	if rgba == nil || len(rgba.Pix) == 0 {
-		return errors.New("invalid buffer")
+	info := d.VideoInfo()
+	if err := checkRGBABuffer(rgba, info); err != nil {
+		return err
 	}
-	decoder_get_rgba(&d.d, &rgba.Pix[0])
-	return nil
+	return rgbaResult(int(decoder_get_rgba(&d.d, &rgba.Pix[0])), info)
 }
 
 func (d *puregoDecoder) GetAudio() ([]byte, error) {

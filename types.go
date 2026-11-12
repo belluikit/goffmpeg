@@ -71,6 +71,13 @@ type IDecoder interface {
 	// ErrAgain is not a failure: see its documentation for the loop shape a
 	// capture device needs.
 	Next() (MediaType, error)
+	// GetRGBA converts the video frame Next just produced into rgba, which must
+	// be VideoInfo's size: a stride of 4*Width and at least Height rows. A
+	// buffer of another size is refused before anything is written. On any
+	// error the buffer is left as it was, so a caller reusing buffers drops
+	// the frame rather than showing what the buffer held before. A stream
+	// that changes resolution partway through gets ErrFrameSizeChanged for
+	// every frame from the change on.
 	GetRGBA(rgba *image.RGBA) error
 	GetAudio() ([]byte, error)
 	// Interrupt makes the decoder give up on the I/O it is blocked in, from
@@ -286,6 +293,52 @@ var ErrAgain = errors.New("goffmpeg: no data available yet")
 // ErrVideoNotBuilt is GetRGBA's answer in a build with the goffmpeg_novideo
 // tag, which decodes audio only: no video frame ever arrives there.
 var ErrVideoNotBuilt = errors.New("goffmpeg: built without video (the goffmpeg_novideo tag)")
+
+// ErrFrameSizeChanged is GetRGBA's answer for a frame whose size differs from
+// VideoInfo's: a stream that changed resolution partway through (#63). The
+// buffer was sized from VideoInfo, so the frame is not converted and the buffer
+// is left as it was. Every frame after the change gets it too; the caller
+// drops those frames.
+var ErrFrameSizeChanged = errors.New("goffmpeg: the video frame's size no longer matches VideoInfo")
+
+// checkRGBABuffer refuses a buffer the bridge would write past or garble.
+// decoder_get_rgba writes VideoInfo's height rows of 4*width bytes each, packed,
+// whatever the image says. With no video stream (width 0) the bridge writes
+// nothing, so any buffer is accepted and the bridge reports why.
+func checkRGBABuffer(rgba *image.RGBA, info VideoInfo) error {
+	if rgba == nil || len(rgba.Pix) == 0 {
+		return errors.New("goffmpeg: GetRGBA: invalid buffer")
+	}
+	if info.Width <= 0 || info.Height <= 0 {
+		return nil
+	}
+	if rgba.Stride != 4*info.Width || len(rgba.Pix) < 4*info.Width*info.Height {
+		return fmt.Errorf("goffmpeg: GetRGBA: buffer is %v with stride %d, want %dx%d (VideoInfo) with stride %d",
+			rgba.Rect.Size(), rgba.Stride, info.Width, info.Height, 4*info.Width)
+	}
+	return nil
+}
+
+// rgbaResult turns decoder_get_rgba's result into GetRGBA's error. The bridge
+// returns sws_scale's row count on success, -1 when there is no frame to
+// convert or no scaler for its pixel format, -2 for a frame whose size differs
+// from VideoInfo, -8 in a novideo build, and otherwise sws_scale's AVERROR.
+func rgbaResult(rc int, info VideoInfo) error {
+	switch {
+	case rc > 0:
+		return nil
+	case rc == -8:
+		return ErrVideoNotBuilt
+	case rc == -2:
+		return fmt.Errorf("%w (VideoInfo is %dx%d)", ErrFrameSizeChanged, info.Width, info.Height)
+	case rc == -1:
+		return errors.New("goffmpeg: GetRGBA: no decoded video frame to convert, or no scaler for its pixel format")
+	case rc == 0:
+		return errors.New("goffmpeg: GetRGBA: the scaler converted no rows")
+	default:
+		return fmt.Errorf("goffmpeg: GetRGBA: %w", AVError(rc))
+	}
+}
 
 // ErrNoDecoder reports an input this build can decode none of: it has a video
 // or audio stream, or both, and no decoder for any of them (#41). The error
