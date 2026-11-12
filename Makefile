@@ -326,6 +326,11 @@ SHARED_CONF = --enable-shared --disable-static --build-suffix=$(SHARED_SUFFIX)
 # own rpath. The iOS ones are then rewrapped as frameworks.
 ifneq ($(filter darwin_% ios_% iossimulator_%,$(TARGET)),)
 	SHARED_CONF += --install-name-dir=@rpath
+	# stage-shared.sh rewrites the iOS install names to framework paths, which
+	# are longer. Without spare header room install_name_tool refuses ("larger
+	# updated load commands do not fit"): it did for iossimulator_arm64's
+	# audio libavcodec once Opus was added (#78).
+	SHARED_CONF += --extra-ldsoflags=-Wl,-headerpad_max_install_names
 endif
 # Android 15 devices can use 16KB pages, and Google Play requires native
 # libraries aligned for them. NDK r28+ does this by default; saying it keeps
