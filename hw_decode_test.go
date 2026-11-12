@@ -374,6 +374,8 @@ func TestHardwareDecodeRoyaltyFree(t *testing.T) {
 		if missing != "" {
 			t.Skipf("the loaded FFmpeg predates #78: no %s decoder", missing)
 		}
+		t.Setenv("GOFFMPEG_HWDECODE", "0")
+		skipWithoutDav1d(t, path)
 		sw := hwDecodeAll(t, path, "0")
 		hw := hwDecodeAll(t, path, "force")
 		sameFrames(t, path+" GOFFMPEG_HWDECODE=force", hw, sw)

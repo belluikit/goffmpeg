@@ -77,6 +77,11 @@ struct DecoderHW {
     // next_replay is the next of those.
     AVPacket *pending[HW_PENDING_MAX];
     int npending, next_replay;
+    // VideoToolbox: a frame has come out (from the hardware or not). Until
+    // then a VideoToolbox in FFmpeg's av1 decoder can still fail and fall back
+    // (hw_fragile). After a fallback: the kind that failed.
+    int delivered;
+    int failed_kind;
 };
 
 // hw_mode reads GOFFMPEG_HWDECODE: 0 software only, 1 the hardware where the
@@ -311,9 +316,23 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
 // frame, for hw_fallback. Past HW_PENDING_MAX it keeps no more: a decoder
 // that has not produced a frame by then is not starting late, and a fallback
 // after it loses the frames of the packets that were not kept.
+// hw_fragile reports a hardware decoder that has produced no frame yet and has
+// no software path of its own to fall back on: MediaCodec, and VideoToolbox
+// running in FFmpeg's av1 decoder, which only drives hardware. A VideoToolbox
+// that reports AV1 hardware and then fails to start leaves that decoder with
+// nothing to decode with (measured in GitHub's macOS VM: "function not
+// implemented"), so it falls back to dav1d like MediaCodec does (#78).
+static int hw_fragile(Decoder *d) {
+    struct DecoderHW *hw = d->hw;
+    if (!hw) return 0;
+    if (hw->kind == HW_MEDIACODEC) return !hw->confirmed;
+    if (hw->kind == HW_VIDEOTOOLBOX) return !hw->delivered && d->v_ctx->codec_id == AV_CODEC_ID_AV1;
+    return 0;
+}
+
 static void hw_keep(Decoder *d, const AVPacket *pkt) {
     struct DecoderHW *hw = d->hw;
-    if (!hw || hw->kind != HW_MEDIACODEC || hw->confirmed) return;
+    if (!hw_fragile(d)) return;
     if (hw->npending < HW_PENDING_MAX) {
         AVPacket *p = av_packet_clone(pkt);
         if (p) hw->pending[hw->npending++] = p;
@@ -330,6 +349,7 @@ static int hw_fallback(Decoder *d) {
     av_log(d->v_ctx, AV_LOG_WARNING, "goffmpeg: the hardware decoder failed before its first frame; decoding in software\n");
     avcodec_free_context(&d->v_ctx);
     d->v_ctx = sw;
+    d->hw->failed_kind = d->hw->kind;
     d->hw->kind = HW_NONE;
     d->hw->next_replay = 0;
     return 0;
@@ -339,8 +359,7 @@ static int hw_fallback(Decoder *d) {
 // it falls back and returns 1, or returns 0 when that is not the case or the
 // software decoder will not open.
 static int hw_refused(Decoder *d) {
-    struct DecoderHW *hw = d->hw;
-    if (!hw || hw->kind != HW_MEDIACODEC || hw->confirmed) return 0;
+    if (!hw_fragile(d)) return 0;
     return hw_fallback(d) == 0;
 }
 
@@ -362,7 +381,12 @@ static int receive_video(Decoder *d) {
     struct DecoderHW *hw = d->hw;
     if (hw && hw->kind == HW_VIDEOTOOLBOX) {
         int ret = receive(d->v_ctx, hw->frame);
+        if (ret < 0 && ret != AVERROR_EOF && hw_fragile(d) && hw_fallback(d) == 0) return 0;
         if (ret != 1) return ret;
+        if (!hw->delivered) {
+            hw->delivered = 1;
+            hw_drop_pending(hw);
+        }
         av_frame_unref(d->v_frame);
         hw->confirmed = hw->frame->format == AV_PIX_FMT_VIDEOTOOLBOX;
         if (!hw->confirmed) {
@@ -414,6 +438,8 @@ const char *decoder_video_decoder(Decoder *d) {
     if (d->hw && d->hw->kind == HW_VIDEOTOOLBOX && d->hw->confirmed)
         return id == AV_CODEC_ID_VP9 ? "vp9 (videotoolbox)" : id == AV_CODEC_ID_AV1 ? "av1 (videotoolbox)" : "h264 (videotoolbox)";
     // After hw_fallback the state stays, with no kind.
+    if (d->hw && d->hw->kind == HW_NONE && d->hw->failed_kind == HW_VIDEOTOOLBOX)
+        return "libdav1d (after videotoolbox failed)";
     if (d->hw && d->hw->kind == HW_NONE)
         return id == AV_CODEC_ID_VP9 ? "vp9 (after vp9_mediacodec failed)" :
                id == AV_CODEC_ID_AV1 ? "libdav1d (after av1_mediacodec failed)" : "h264 (after h264_mediacodec failed)";
