@@ -12,10 +12,16 @@ import (
 	"time"
 )
 
-// longMP3 is about three minutes of MP3 built from the one-second fixture: its
+// longMP3 is about 70 minutes of MP3 built from the one-second fixture: its
 // audio frames, without the ID3 tag and without the LAME Info frame, repeated.
 // With no Info frame there is no seek table, so a far seek is answered the way
 // a network MP3 without one is: from the bitrate, by reading.
+//
+// It is 33 MB so that Open's ID3v1 check at the end of the file is always a
+// range request (#80). FFmpeg reads forward instead of seeking when the target
+// is within the TCP socket's receive window (SO_RCVBUF, which the kernel
+// tunes): at 1.5 MB, a moto g power 5G 2024 read the whole file through the
+// stalling server's stalled range, and Open never returned.
 func longMP3(t *testing.T) []byte {
 	t.Helper()
 	data, err := os.ReadFile("testdata/sample_cover.mp3")
@@ -31,7 +37,7 @@ func longMP3(t *testing.T) []byte {
 		t.Fatal("fixture layout changed: no Info frame where expected")
 	}
 	frames = frames[4+next:]
-	return bytes.Repeat(frames, 180)
+	return bytes.Repeat(frames, 4000)
 }
 
 // stallingServer serves media over http, honouring Range, but only what Open
