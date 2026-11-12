@@ -220,6 +220,14 @@ endif
 ifeq ($(SET)$(filter darwin_% ios_% iossimulator_%,$(TARGET)),media$(TARGET))
 	SET_HWACCELS += h264_videotoolbox
 endif
+# MediaCodec is a decoder of its own, not a hwaccel of h264 (goffmpeg-libs#21,
+# #65). It selects the h264_mp4toannexb filter and the h264 parser, which the
+# set already has. FFmpeg registers it after the software h264, so a lookup by
+# codec ID still returns h264; a caller that wants the phone's decoder opens it
+# by name.
+ifeq ($(SET)$(filter android_%,$(TARGET)),media$(TARGET))
+	SET_DECODERS += h264_mediacodec
+endif
 
 # The desktop media set has every codec (owner, #41): the lists above are
 # then a floor rather than the set. check-components holds the build to having
