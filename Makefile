@@ -1,4 +1,6 @@
 FFMPEG_SRC ?= $(shell cd ../ffmpeg 2>/dev/null && pwd)
+# dav1d, VideoLAN's AV1 decoder, built into the media set's libavcodec (#78).
+DAV1D_SRC  ?= $(shell cd ../dav1d 2>/dev/null && pwd)
 ROOT       := $(shell pwd)
 DIST_ROOT  := $(ROOT)/internal/libav/dist
 BUILD_ROOT := $(ROOT)/internal/libav/build
@@ -200,9 +202,20 @@ ifeq ($(SET),media)
 	# to them. They read containers; no decoder comes with them.
 	SET_DEMUXERS += hls mpegts aac ac3 eac3
 	SET_PARSERS  += ac3
+	# The royalty-free formats (owner, #78), so an app can move its content
+	# to them: VP9 and AV1 video, Opus audio, in WebM, Ogg and MP4. dav1d
+	# (libdav1d) decodes AV1 in software; FFmpeg's own av1 decoder has no
+	# software path and is there to host the hardware decoders.
+	SET_DEMUXERS += matroska ogg
+	SET_DECODERS += vp9 libdav1d av1 opus
+	SET_PARSERS  += vp9 av1 opus
 	SHARED_SUFFIX   := -goffmpeg
 	SHARED_DIR_NAME := shared
 else ifeq ($(SET),audio)
+	# Opus in Ogg (owner, #78), beside MP3 and WAV.
+	SET_DEMUXERS += ogg
+	SET_DECODERS += opus
+	SET_PARSERS  += opus
 	SHARED_SUFFIX   := -goffmpeg-audio
 	SHARED_DIR_NAME := shared-audio
 else
@@ -216,17 +229,19 @@ ifeq ($(SET)$(filter darwin_% linux_% windows_%,$(TARGET)),media$(TARGET))
 	SET_DECODERS += rawvideo mjpeg
 	SET_INDEVS   += $(if $(filter darwin_%,$(TARGET)),avfoundation,$(if $(filter linux_%,$(TARGET)),v4l2,dshow))
 endif
-# VideoToolbox decodes through FFmpeg's own h264 decoder, which it selects.
+# VideoToolbox decodes through FFmpeg's own h264, vp9 and av1 decoders,
+# which its hwaccels select.
 ifeq ($(SET)$(filter darwin_% ios_% iossimulator_%,$(TARGET)),media$(TARGET))
-	SET_HWACCELS += h264_videotoolbox
+	SET_HWACCELS += h264_videotoolbox vp9_videotoolbox av1_videotoolbox
 endif
 # MediaCodec is a decoder of its own, not a hwaccel of h264 (goffmpeg-libs#21,
 # #65). It selects the h264_mp4toannexb filter and the h264 parser, which the
 # set already has. FFmpeg registers it after the software h264, so a lookup by
 # codec ID still returns h264; a caller that wants the phone's decoder opens it
 # by name.
+# The same for VP9 and AV1 (#78).
 ifeq ($(SET)$(filter android_%,$(TARGET)),media$(TARGET))
-	SET_DECODERS += h264_mediacodec
+	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec
 endif
 
 # The desktop media set has every codec (owner, #41): the lists above are
@@ -262,6 +277,28 @@ ifeq ($(SET),audio)
 endif
 
 FFMPEG_CONF = $(BASE_CONF) $(TARGET_CONF) $(SET_CONF)
+
+# dav1d (#78): built for TARGET by scripts/build-dav1d.sh with the compiler the
+# smoke test uses, installed under DAV1D_PREFIX, and linked statically into
+# libavcodec. Only the media set has video. configure finds it through
+# pkg-config, the host's, pointed at DAV1D_PREFIX alone: with a cross prefix,
+# configure would otherwise look for <prefix>pkg-config, find none, and fail.
+DAV1D_BUILD  := $(BUILD_ROOT)/$(TARGET)-dav1d
+DAV1D_PREFIX := $(BUILD_ROOT)/$(TARGET)-dav1d-install
+DAV1D_AR ?= ar
+ifneq ($(filter android_%,$(TARGET)),)
+	DAV1D_AR = $(NDK_BIN)/llvm-ar
+endif
+ifeq ($(TARGET),windows_amd64)
+	DAV1D_AR = x86_64-w64-mingw32-ar
+endif
+ifeq ($(TARGET),windows_arm64)
+	DAV1D_AR = $(LLVM_MINGW)/bin/llvm-ar
+endif
+ifeq ($(SET),media)
+	FFMPEG_CONF += --enable-libdav1d --pkg-config=pkg-config --pkg-config-flags=--static
+	DAV1D_ENV = PKG_CONFIG_LIBDIR="$(DAV1D_PREFIX)/lib/pkgconfig" PKG_CONFIG_PATH=
+endif
 
 # --- Shared libraries -------------------------------------------------------
 # Player's ADR-0037 D3 ships FFmpeg as shared libraries on every platform, so a
@@ -315,7 +352,7 @@ ifneq ($(filter linux_%,$(TARGET)),)
 endif
 
 .PHONY: all dist dist-all clean clean-all check-src patch-src print-config \
-        bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths \
+        bridge-shared linux-docker test test-cgo test-purego sync-libs sync-headers check-paths dav1d \
         check-shared check-components smoke-shared
 
 # `all` builds the host target only. Use dist-all for the full matrix.
@@ -325,6 +362,15 @@ check-src:
 	@test -n "$(FFMPEG_SRC)" && test -x "$(FFMPEG_SRC)/configure" || { \
 		echo "FFmpeg source not found. Clone it next to this repo or set FFMPEG_SRC=/path/to/ffmpeg"; \
 		exit 1; }
+
+# dav1d for the media set (#78). The release is pinned in CI (DAV1D_REF in
+# .github/workflows/build.yml) the way FFmpeg is.
+dav1d:
+	@test -n "$(DAV1D_SRC)" && test -f "$(DAV1D_SRC)/meson.build" || { \
+		echo "dav1d source not found. Clone it next to this repo or set DAV1D_SRC=/path/to/dav1d"; \
+		exit 1; }
+	DAV1D_CC="$(SMOKE_CC)" DAV1D_AR="$(DAV1D_AR)" \
+		scripts/build-dav1d.sh "$(TARGET)" "$(DAV1D_SRC)" "$(DAV1D_BUILD)" "$(DAV1D_PREFIX)"
 
 # Local fixes carried against the pinned FFmpeg revision. Each one is a real
 # upstream bug with a real upstream patch pending; this directory is what stops
@@ -371,9 +417,9 @@ print-config: check-src
 # per library on iOS. FFmpeg's own install tree is staged separately because it
 # is built of symlinks, which a Go module zip leaves out; sync-headers reads the
 # headers from it.
-dist: check-src patch-src
+dist: check-src patch-src $(if $(filter media,$(SET)),dav1d)
 	@mkdir -p "$(SHARED_BUILD_DIR)"
-	cd "$(SHARED_BUILD_DIR)" && "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
+	cd "$(SHARED_BUILD_DIR)" && $(DAV1D_ENV) "$(FFMPEG_SRC)/configure" $(FFMPEG_CONF) $(SHARED_CONF)
 	@$(MAKE) --no-print-directory check-components TARGET=$(TARGET) SET=$(SET)
 	$(MAKE) -C "$(SHARED_BUILD_DIR)" -j$(NPROC) $(SHARED_MAKEVARS)
 	rm -rf "$(SHARED_STAGE)"
@@ -484,14 +530,14 @@ DOCKER_GOALS ?= dist
 LINUX_IMAGE := ubuntu:22.04
 linux-docker: check-src
 	docker run --rm --platform linux/$(subst linux_,,$(TARGET)) \
-		-v "$(ROOT)":/work -v "$(FFMPEG_SRC)":/ffmpeg -w /work \
+		-v "$(ROOT)":/work -v "$(FFMPEG_SRC)":/ffmpeg -v "$(DAV1D_SRC)":/dav1d -w /work \
 		$(LINUX_IMAGE) bash -c '\
 			set -e; \
-			sh scripts/apt-install.sh build-essential yasm nasm pkg-config libssl-dev make patch \
-				-- make cc nasm pkg-config patch; \
+			sh scripts/apt-install.sh build-essential yasm nasm pkg-config libssl-dev make patch meson ninja-build \
+				-- make cc nasm pkg-config patch meson ninja; \
 			trap "chown -R $(shell id -u):$(shell id -g) /work/internal/libav/dist/$(TARGET) /work/internal/libav/build/$(TARGET)-* 2>/dev/null || true" EXIT; \
 			ldd --version | head -n 1; \
-			make $(DOCKER_GOALS) TARGET=$(TARGET) FFMPEG_SRC=/ffmpeg NPROC=$$(nproc)'
+			make $(DOCKER_GOALS) TARGET=$(TARGET) FFMPEG_SRC=/ffmpeg DAV1D_SRC=/dav1d NPROC=$$(nproc)'
 
 # Toolchain and system libraries for the shared bridge, selected by TARGET
 # rather than by host: the Windows bridge is cross-built from Linux.
