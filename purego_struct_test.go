@@ -20,8 +20,11 @@ func TestDecoderStructSize(t *testing.T) {
 	// A library from before decoder_interrupt has no interrupt field; its
 	// struct ends where that field begins. The Go mirror being larger than
 	// such a library's struct is safe: its memset covers less.
+	// Likewise a library from before #65, which has no hw field.
 	if decoder_interrupt == nil {
 		g = int(unsafe.Offsetof(cDecoder{}.interrupt))
+	} else if decoder_video_decoder == nil {
+		g = int(unsafe.Offsetof(cDecoder{}.hw))
 	}
 	if c := int(decoder_struct_size()); c != g {
 		t.Fatalf("sizeof(Decoder) = %d in C, %d in Go", c, g)

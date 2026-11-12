@@ -310,8 +310,8 @@ which `hls` selects) and no bitstream filter that isn't selected by something
 it keeps. On Android it also has MediaCodec's H.264 decoder, `h264_mediacodec`
 (goffmpeg-libs#21), which selects the `h264_mp4toannexb` filter. MediaCodec is
 a decoder of its own rather than a hwaccel, and FFmpeg registers it after the
-software `h264`, so a lookup by codec ID still finds `h264`. goffmpeg opens
-neither hardware decoder yet (#65). On desktop, the media set has every hwaccel, parser and filter, and
+software `h264`, so a lookup by codec ID still finds `h264`: the bridge opens
+it by name (#65; README's Hardware decoding says when). On desktop, the media set has every hwaccel, parser and filter, and
 one input device, the one that reads cameras on each OS (`avfoundation`,
 `v4l2`, `dshow`): the rest aren't used. Every protocol stays, so `http`, and
 `https` where the target has TLS, still open.

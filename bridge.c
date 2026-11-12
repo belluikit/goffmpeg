@@ -2,7 +2,17 @@
 #include <libavutil/mem.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/log.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#ifdef __ANDROID__
+#include <pthread.h>
+#include <stdarg.h>
+#endif
 
 // find_video_stream is av_find_best_stream for video, minus attached pictures.
 // The cover art an MP3, M4A or FLAC embeds is a one-packet video stream, and
@@ -27,6 +37,328 @@ static int find_video_stream(AVFormatContext *fmt) {
     return idx;
 }
 
+static int receive(AVCodecContext *ctx, AVFrame *f);
+
+#ifndef GOFFMPEG_NO_VIDEO
+// The phone's hardware decoder (#65). bridge.h's decoder_video_decoder says
+// when each is used. Two kinds, opened differently:
+//
+//  - MediaCodec (Android) is a decoder of its own, h264_mediacodec, opened by
+//    name. It opens for streams it then cannot decode (High 4:4:4 opens and
+//    fails on the first frame with AVERROR_EXTERNAL, measured on the
+//    OPD2403), so it is offered only what hw_suits passes. In case it fails anyway
+//    before its first frame, the video packets sent to it are kept and are
+//    sent again to the software decoder that replaces it, so no frame is lost.
+//    Its frames are nv12 in system memory.
+//
+//  - VideoToolbox (Apple) is a hwaccel of the software h264 decoder: the same
+//    decoder, given a hardware device and a get_format that picks it. When
+//    VideoToolbox will not start, FFmpeg asks get_format again without it and
+//    the decoder carries on in software. Its frames are CVPixelBuffers, copied
+//    to nv12 in system memory by av_hwframe_transfer_data.
+enum { HW_NONE, HW_MEDIACODEC, HW_VIDEOTOOLBOX };
+#define HW_PENDING_MAX 64
+
+struct DecoderHW {
+    int kind;
+    // MediaCodec: a frame has come out, so the kept packets are dropped and no
+    // more are kept. VideoToolbox: the last frame came out of the hardware.
+    int confirmed;
+    // VideoToolbox: the device, and the frame a hardware frame lands in
+    // before it is copied to d->v_frame.
+    AVBufferRef *device;
+    AVFrame *frame;
+    // MediaCodec: the video packets sent since the open or the last seek,
+    // until the first frame. After a fallback, the ones still to send again;
+    // next_replay is the next of those.
+    AVPacket *pending[HW_PENDING_MAX];
+    int npending, next_replay;
+};
+
+// hw_mode reads GOFFMPEG_HWDECODE: 0 software only, 1 the hardware where the
+// platform has it, 2 the hardware with no profile check.
+static int hw_mode(void) {
+    const char *v = getenv("GOFFMPEG_HWDECODE");
+    if (v && strcmp(v, "0") == 0) return 0;
+    if (v && strcmp(v, "1") == 0) return 1;
+    if (v && strcmp(v, "force") == 0) return 2;
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+static void hw_drop_pending(struct DecoderHW *hw) {
+    for (int i = 0; i < hw->npending; i++) av_packet_free(&hw->pending[i]);
+    hw->npending = 0;
+    hw->next_replay = 0;
+}
+
+static void hw_free(Decoder *d) {
+    if (!d->hw) return;
+    hw_drop_pending(d->hw);
+    av_frame_free(&d->hw->frame);
+    av_buffer_unref(&d->hw->device);
+    av_freep(&d->hw);
+}
+
+static void hw_seeked(Decoder *d) {
+    if (d->hw) hw_drop_pending(d->hw);
+}
+
+// hw_suits is the profile check: the streams the phones' hardware decoders
+// decode, 8-bit 4:2:0 H.264 in the Baseline, Main and High profiles. Others
+// are not offered to it. MediaCodec opens High 4:4:4 and then fails, and
+// VideoToolbox refuses it at the first frame with an error in the log; the
+// software decoder decodes either way, but this keeps the log clean and the
+// fallback for what nobody predicted.
+static int hw_suits(const AVCodecParameters *par) {
+    if (par->codec_id != AV_CODEC_ID_H264) return 0;
+    if (par->format != AV_PIX_FMT_YUV420P && par->format != AV_PIX_FMT_YUVJ420P) return 0;
+    switch (par->profile) {
+    case AV_PROFILE_H264_BASELINE:
+    case AV_PROFILE_H264_CONSTRAINED_BASELINE:
+    case AV_PROFILE_H264_MAIN:
+    case AV_PROFILE_H264_HIGH:
+        return 1;
+    }
+    return 0;
+}
+
+static AVCodecContext *open_software_video(AVStream *st) {
+    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec) return NULL;
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return NULL;
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    ctx->thread_count = 0;
+    if (avcodec_open2(ctx, codec, NULL) < 0) avcodec_free_context(&ctx);
+    return ctx;
+}
+
+#ifdef __ANDROID__
+// MEDIACODEC_MIN_PIXELS: MediaCodec is used only for frames larger than
+// 1280x720 (owner's decision, #65). Measured on the OPD2403 in a real player
+// (PR #70): at 1080p30 it took the device from about 110% of a core to 96%,
+// MediaCodec's own process included; at 720x720 from 71% to 77%, and it
+// dropped 6 frames in 1,188 where software dropped none. MediaCodec's process
+// costs about 11% of a core per stream whatever the size, so below 1080p
+// that cost is more than the software decoding it replaces.
+#define MEDIACODEC_MIN_PIXELS (1280 * 720)
+
+// FFmpeg asks for a Java VM on every MediaCodec open, to look the decoder up
+// by profile, and logs "No Java virtual machine has been registered" at error
+// level when none was set with av_jni_set_java_vm. It then finds the decoder
+// through the NDK, which needs no VM, and decodes. So the message is no error
+// here, and at goffmpeg's default level (LogError, #19) it would print twice
+// for every video an app opens. This demotes that one message to verbose; the
+// callback is installed once, the first time MediaCodec is opened, and passes
+// everything else to FFmpeg's own.
+static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
+    if (fmt && strcmp(fmt, "No Java virtual machine has been registered\n") == 0) level = AV_LOG_VERBOSE;
+    av_log_default_callback(avcl, level, fmt, vl);
+}
+static void mediacodec_log_install(void) { av_log_set_callback(mediacodec_log); }
+static pthread_once_t mediacodec_log_once = PTHREAD_ONCE_INIT;
+
+static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
+    pthread_once(&mediacodec_log_once, mediacodec_log_install);
+    const AVCodec *codec = avcodec_find_decoder_by_name("h264_mediacodec");
+    if (!codec) return NULL;
+    struct DecoderHW *hw = av_mallocz(sizeof(*hw));
+    AVCodecContext *ctx = hw ? avcodec_alloc_context3(codec) : NULL;
+    if (!ctx) {
+        av_free(hw);
+        return NULL;
+    }
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    if (avcodec_open2(ctx, codec, NULL) < 0) {
+        avcodec_free_context(&ctx);
+        av_free(hw);
+        return NULL;
+    }
+    hw->kind = HW_MEDIACODEC;
+    d->hw = hw;
+    return ctx;
+}
+#endif
+
+#ifdef __APPLE__
+static enum AVPixelFormat vt_get_format(AVCodecContext *ctx, const enum AVPixelFormat *fmts) {
+    (void)ctx;
+    for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++)
+        if (*p == AV_PIX_FMT_VIDEOTOOLBOX) return *p;
+    // Offered without VideoToolbox, which is FFmpeg's fallback when it would
+    // not start: the first software format, as the default get_format picks.
+    for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
+        if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) return *p;
+    }
+    return AV_PIX_FMT_NONE;
+}
+
+static AVCodecContext *open_videotoolbox(Decoder *d, AVStream *st) {
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!codec) return NULL;
+    AVBufferRef *device = NULL;
+    if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, NULL, NULL, 0) < 0) return NULL;
+    struct DecoderHW *hw = av_mallocz(sizeof(*hw));
+    AVCodecContext *ctx = hw ? avcodec_alloc_context3(codec) : NULL;
+    if (hw) hw->frame = av_frame_alloc();
+    if (!ctx || !hw->frame) {
+        avcodec_free_context(&ctx);
+        if (hw) av_frame_free(&hw->frame);
+        av_free(hw);
+        av_buffer_unref(&device);
+        return NULL;
+    }
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    ctx->thread_count = 0;
+    ctx->hw_device_ctx = av_buffer_ref(device);
+    ctx->get_format = vt_get_format;
+    if (avcodec_open2(ctx, codec, NULL) < 0) {
+        avcodec_free_context(&ctx);
+        av_frame_free(&hw->frame);
+        av_free(hw);
+        av_buffer_unref(&device);
+        return NULL;
+    }
+    hw->kind = HW_VIDEOTOOLBOX;
+    hw->device = device;
+    d->hw = hw;
+    return ctx;
+}
+#endif
+
+// open_video opens the stream's decoder: the hardware one when the platform
+// has it and the stream suits it, else the software one. NULL when neither
+// opens.
+static AVCodecContext *open_video(Decoder *d, AVStream *st) {
+    int mode = hw_mode();
+    AVCodecContext *ctx = NULL;
+    if (st->codecpar->codec_id == AV_CODEC_ID_H264 && (mode == 2 || (mode == 1 && hw_suits(st->codecpar)))) {
+#ifdef __ANDROID__
+        if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
+            ctx = open_mediacodec(d, st);
+#endif
+#ifdef __APPLE__
+        ctx = open_videotoolbox(d, st);
+#endif
+    }
+    return ctx ? ctx : open_software_video(st);
+}
+
+// hw_keep keeps a copy of a video packet sent to MediaCodec before its first
+// frame, for hw_fallback. Past HW_PENDING_MAX it keeps no more: a decoder
+// that has not produced a frame by then is not starting late, and a fallback
+// after it loses the frames of the packets that were not kept.
+static void hw_keep(Decoder *d, const AVPacket *pkt) {
+    struct DecoderHW *hw = d->hw;
+    if (!hw || hw->kind != HW_MEDIACODEC || hw->confirmed) return;
+    if (hw->npending < HW_PENDING_MAX) {
+        AVPacket *p = av_packet_clone(pkt);
+        if (p) hw->pending[hw->npending++] = p;
+    }
+}
+
+// hw_fallback replaces MediaCodec, which failed before its first frame, with
+// the software decoder, and leaves the kept packets to be sent again
+// (hw_replay). It returns 0, or a negative code when the software decoder
+// will not open either.
+static int hw_fallback(Decoder *d) {
+    AVCodecContext *sw = open_software_video(d->fmt_ctx->streams[d->v_stream_idx]);
+    if (!sw) return -1;
+    av_log(d->v_ctx, AV_LOG_WARNING, "goffmpeg: the hardware decoder failed before its first frame; decoding in software\n");
+    avcodec_free_context(&d->v_ctx);
+    d->v_ctx = sw;
+    d->hw->kind = HW_NONE;
+    d->hw->next_replay = 0;
+    return 0;
+}
+
+// hw_refused handles MediaCodec refusing a packet before its first frame:
+// it falls back and returns 1, or returns 0 when that is not the case or the
+// software decoder will not open.
+static int hw_refused(Decoder *d) {
+    struct DecoderHW *hw = d->hw;
+    if (!hw || hw->kind != HW_MEDIACODEC || hw->confirmed) return 0;
+    return hw_fallback(d) == 0;
+}
+
+// hw_replay moves the next kept packet into pkt, for decoder_next to send in
+// place of a read. It returns 1 when it did, 0 when none is left.
+static int hw_replay(Decoder *d, AVPacket *pkt) {
+    struct DecoderHW *hw = d->hw;
+    if (!hw || hw->kind != HW_NONE || hw->next_replay >= hw->npending) return 0;
+    av_packet_move_ref(pkt, hw->pending[hw->next_replay++]);
+    if (hw->next_replay == hw->npending) hw_drop_pending(hw);
+    return 1;
+}
+
+// receive_video is receive for the video decoder, with the hardware's part:
+// a VideoToolbox frame is copied to d->v_frame in system memory, and a
+// MediaCodec failure before the first frame becomes a fallback, reported as
+// "no frame yet" so decoder_next goes on to the kept packets.
+static int receive_video(Decoder *d) {
+    struct DecoderHW *hw = d->hw;
+    if (hw && hw->kind == HW_VIDEOTOOLBOX) {
+        int ret = receive(d->v_ctx, hw->frame);
+        if (ret != 1) return ret;
+        av_frame_unref(d->v_frame);
+        hw->confirmed = hw->frame->format == AV_PIX_FMT_VIDEOTOOLBOX;
+        if (!hw->confirmed) {
+            av_frame_move_ref(d->v_frame, hw->frame);
+            return 1;
+        }
+        int rc = av_hwframe_transfer_data(d->v_frame, hw->frame, 0);
+        if (rc >= 0) rc = av_frame_copy_props(d->v_frame, hw->frame);
+        av_frame_unref(hw->frame);
+        return rc < 0 ? rc : 1;
+    }
+    int ret = receive(d->v_ctx, d->v_frame);
+    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC) {
+        // MediaCodec fills in a colour description the stream may not give:
+        // an untagged stream comes out tagged with the matrix MediaCodec
+        // guessed, so GetYCbCr would report a guess as stated (measured on the
+        // OPD2403). The stream's own tags, which the software decoder
+        // reports, are put back.
+        const AVCodecParameters *par = d->fmt_ctx->streams[d->v_stream_idx]->codecpar;
+        d->v_frame->colorspace = par->color_space;
+        d->v_frame->color_range = par->color_range;
+        d->v_frame->color_primaries = par->color_primaries;
+        d->v_frame->color_trc = par->color_trc;
+    }
+    if (hw && hw->kind == HW_MEDIACODEC && !hw->confirmed) {
+        if (ret == 1) {
+            hw->confirmed = 1;
+            hw_drop_pending(hw);
+        } else if (ret < 0 && ret != AVERROR_EOF && hw_fallback(d) == 0) {
+            return 0;
+        }
+    }
+    return ret;
+}
+#else
+// An audio-only build opens no video decoder, so there is no hardware state.
+static void hw_free(Decoder *d) { (void)d; }
+static void hw_seeked(Decoder *d) { (void)d; }
+static void hw_keep(Decoder *d, const AVPacket *pkt) { (void)d; (void)pkt; }
+static int hw_refused(Decoder *d) { (void)d; return 0; }
+static int hw_replay(Decoder *d, AVPacket *pkt) { (void)d; (void)pkt; return 0; }
+static int receive_video(Decoder *d) { return receive(d->v_ctx, d->v_frame); }
+#endif
+
+const char *decoder_video_decoder(Decoder *d) {
+    if (!d || !d->v_ctx || !d->v_ctx->codec) return NULL;
+#ifndef GOFFMPEG_NO_VIDEO
+    if (d->hw && d->hw->kind == HW_VIDEOTOOLBOX && d->hw->confirmed) return "h264 (videotoolbox)";
+    // After hw_fallback the state stays, with no kind.
+    if (d->hw && d->hw->kind == HW_NONE) return "h264 (after h264_mediacodec failed)";
+#endif
+    return d->v_ctx->codec->name;
+}
+
 // decoder_setup_streams finds the best video/audio streams, opens their
 // decoders, and prepares the swscale/swresample converters. Shared by
 // decoder_open (files/URLs), decoder_open_device (capture devices) and
@@ -44,24 +376,19 @@ int decoder_setup_streams(Decoder *d) {
     d->v_stream_idx = find_video_stream(d->fmt_ctx);
     if (d->v_stream_idx >= 0) {
         AVStream *st = d->fmt_ctx->streams[d->v_stream_idx];
-        const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
-        if (codec) {
-            d->v_ctx = avcodec_alloc_context3(codec);
-            avcodec_parameters_to_context(d->v_ctx, st->codecpar);
-            d->v_ctx->thread_count = 0;
-            if (avcodec_open2(d->v_ctx, codec, NULL) >= 0) {
-                d->width = d->v_ctx->width;
-                d->height = d->v_ctx->height;
-                d->framerate = av_q2d(st->avg_frame_rate);
+        d->v_ctx = open_video(d, st);
+        if (d->v_ctx) {
+            d->width = d->v_ctx->width;
+            d->height = d->v_ctx->height;
+            d->framerate = av_q2d(st->avg_frame_rate);
 
-                d->v_frame = av_frame_alloc();
-                // The scaler is built lazily in decoder_get_rgba from the
-                // frame that actually arrives. Probing does not always settle
-                // the pixel format up front — a forward-only stream whose
-                // index sits at the end of the file reports AV_PIX_FMT_NONE —
-                // and handing that to sws_getContext trips an assertion that
-                // abort()s the process instead of returning an error.
-            }
+            d->v_frame = av_frame_alloc();
+            // The scaler is built lazily in decoder_get_rgba from the
+            // frame that actually arrives. Probing does not always settle
+            // the pixel format up front — a forward-only stream whose
+            // index sits at the end of the file reports AV_PIX_FMT_NONE —
+            // and handing that to sws_getContext trips an assertion that
+            // abort()s the process instead of returning an error.
         }
     }
 #endif
@@ -274,6 +601,9 @@ int decoder_seek(Decoder *d, double seconds) {
     if (decoder_interrupted(d)) return AVERROR_EXIT;
     if (d->v_ctx) avcodec_flush_buffers(d->v_ctx);
     if (d->a_ctx) avcodec_flush_buffers(d->a_ctx);
+    // Packets kept for a MediaCodec fallback, or still to send after one, are
+    // from before the seek.
+    hw_seeked(d);
     // swresample still holds samples from before the seek, which would come
     // out after it; reinitialising discards them (#24).
     if (d->swr_ctx) swr_init(d->swr_ctx);
@@ -313,7 +643,7 @@ int decoder_next(Decoder *d) {
     for (;;) {
         int v_done = 1, a_done = 1;
         if (d->v_frame) {
-            int ret = receive(d->v_ctx, d->v_frame);
+            int ret = receive_video(d);
             if (ret == 1) {
                 // Adopt the real geometry once a frame arrives; probing may
                 // not have resolved it, and callers size their buffers from
@@ -354,6 +684,15 @@ int decoder_next(Decoder *d) {
             return 0;
         }
 
+        // After a fallback from MediaCodec, the packets it was sent go to the
+        // software decoder before anything new is read.
+        if (hw_replay(d, d->pkt)) {
+            int sent = avcodec_send_packet(d->v_ctx, d->pkt);
+            av_packet_unref(d->pkt);
+            if (sent < 0) return sent;
+            continue;
+        }
+
         int ret = av_read_frame(d->fmt_ctx, d->pkt);
         // EAGAIN is a non-blocking device saying "not yet" and must not be
         // confused with either an end or a failure (#4).
@@ -376,8 +715,12 @@ int decoder_next(Decoder *d) {
         AVCodecContext *ctx = NULL;
         if (d->v_frame && d->pkt->stream_index == d->v_stream_idx) ctx = d->v_ctx;
         if (d->a_frame && d->pkt->stream_index == d->a_stream_idx) ctx = d->a_ctx;
+        if (ctx && ctx == d->v_ctx) hw_keep(d, d->pkt);
         ret = ctx ? avcodec_send_packet(ctx, d->pkt) : 0;
         av_packet_unref(d->pkt);
+        // MediaCodec refusing a packet before its first frame is a fallback:
+        // the packet was kept, and goes to the software decoder with the rest.
+        if (ret < 0 && ctx == d->v_ctx && hw_refused(d)) ret = 0;
         if (ret < 0) return ret;
     }
 }
@@ -432,10 +775,25 @@ int decoder_get_yuv(Decoder *d, uint8_t *y, int y_stride, uint8_t *u, uint8_t *v
     AVFrame *f = d->v_frame;
     if (f->width <= 0 || f->height <= 0 || f->format == AV_PIX_FMT_NONE) return -1;
     if (f->width != d->width || f->height != d->height) return -2;
-    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) return -3;
+    int nv12 = f->format == AV_PIX_FMT_NV12;
+    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P && !nv12) return -3;
 
     int cw = (f->width + 1) / 2, ch = (f->height + 1) / 2;
     av_image_copy_plane(y, y_stride, f->data[0], f->linesize[0], f->width, f->height);
+    if (nv12) {
+        // What the phones' hardware decoders deliver (#65): the same 4:2:0
+        // samples, with Cb and Cr interleaved in one plane. They are split
+        // into the caller's two planes as they are copied.
+        for (int r = 0; r < ch; r++) {
+            const uint8_t *src = f->data[1] + (ptrdiff_t)r * f->linesize[1];
+            uint8_t *du = u + (ptrdiff_t)r * c_stride, *dv = v + (ptrdiff_t)r * c_stride;
+            for (int c = 0; c < cw; c++) {
+                du[c] = src[2 * c];
+                dv[c] = src[2 * c + 1];
+            }
+        }
+        return 0;
+    }
     av_image_copy_plane(u, c_stride, f->data[1], f->linesize[1], cw, ch);
     av_image_copy_plane(v, c_stride, f->data[2], f->linesize[2], cw, ch);
     return 0;
@@ -512,6 +870,7 @@ void decoder_close(Decoder *d) {
     if (d->audio_buf) av_freep(&d->audio_buf);
     if (d->v_ctx) avcodec_free_context(&d->v_ctx);
     if (d->a_ctx) avcodec_free_context(&d->a_ctx);
+    hw_free(d);
     if (d->fmt_ctx) avformat_close_input(&d->fmt_ctx);
     if (d->pkt) av_packet_free(&d->pkt);
     // Custom IO is not owned by fmt_ctx, so avformat_close_input leaves it

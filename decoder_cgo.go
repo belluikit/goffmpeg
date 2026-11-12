@@ -158,6 +158,15 @@ func listDeviceModes(format, url string) ([]DeviceMode, error) {
 	return out, nil
 }
 
+// videoDecoder is decoder_video_decoder: what decoded the last video frame
+// (#65), empty with no video.
+func (d *cgoDecoder) videoDecoder() string {
+	if s := C.decoder_video_decoder(&d.d); s != nil {
+		return C.GoString(s)
+	}
+	return ""
+}
+
 func (d *cgoDecoder) VideoInfo() VideoInfo {
 	return VideoInfo{
 		Width:  int(d.d.width),

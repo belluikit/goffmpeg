@@ -54,16 +54,18 @@ type YCbCrInfo struct {
 type YCbCrDecoder interface {
 	// GetYCbCr copies the frame most recently returned by Next into dst,
 	// which must be 4:2:0 (image.YCbCrSubsampleRatio420) and the size
-	// VideoInfo reports. Only 8-bit 4:2:0 planar frames are copied, which is
-	// what nearly all H.264, HEVC and VP9 decodes to; any other format
-	// returns an error wrapping ErrPixelFormat that names it, and GetRGBA
-	// still converts it.
+	// VideoInfo reports. Only 8-bit 4:2:0 frames are copied, which is what
+	// nearly all H.264, HEVC and VP9 decodes to: planar (yuv420p, yuvj420p),
+	// or nv12, whose interleaved chroma the phones' hardware decoders deliver
+	// (#65) and which is split into dst's Cb and Cr as it is copied. Any other
+	// format returns an error wrapping ErrPixelFormat that names it, and
+	// GetRGBA still converts it.
 	GetYCbCr(dst *image.YCbCr) (YCbCrInfo, error)
 }
 
 // ErrPixelFormat is GetYCbCr's answer for a frame it does not copy: one that
-// is not 8-bit 4:2:0 planar. The error wrapping it names the format.
-var ErrPixelFormat = errors.New("goffmpeg: frame is not 8-bit 4:2:0 planar")
+// is not 8-bit 4:2:0, planar or nv12. The error wrapping it names the format.
+var ErrPixelFormat = errors.New("goffmpeg: frame is not 8-bit 4:2:0")
 
 // ErrFrameSize is the answer for a frame whose size is not the size the
 // decoder opened with, which a stream that changes resolution partway through

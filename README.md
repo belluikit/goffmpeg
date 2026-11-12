@@ -100,7 +100,8 @@ decoded, with no conversion, for a caller that converts to RGB on the GPU
 (#64). It also returns the frame's colour matrix (BT.601, BT.709 or BT.2020) and
 range, and says when the matrix is a guess from the frame's height because the
 stream does not state it. It copies 8-bit 4:2:0 only, which is nearly all H.264,
-HEVC and VP9. Any other format returns `ErrPixelFormat` naming it, and
+HEVC and VP9, planar or as the phones' hardware decoders deliver it (`nv12`,
+split into `Cb` and `Cr`). Any other format returns `ErrPixelFormat` naming it, and
 `GetRGBA` still converts it. Under `CGO_ENABLED=0` it needs a libgoffmpeg
 that exports `decoder_get_yuv`.
 
@@ -158,16 +159,48 @@ matching goffmpeg-libs module:
 
 | GOOS/GOARCH | Notes from the source |
 |---|---|
-| `darwin/arm64`, `darwin/amd64` | avfoundation capture; VideoToolbox hardware decode on arm64 |
+| `darwin/arm64`, `darwin/amd64` | avfoundation capture; VideoToolbox H.264 decode with `GOFFMPEG_HWDECODE=1` (see below) |
 | `linux/amd64`, `linux/arm64` | v4l2 capture; OpenSSL for https |
 | `windows/amd64`, `windows/arm64` | dshow capture; Schannel for TLS |
-| `ios/arm64` | No avdevice; VideoToolbox's H.264 hwaccel is built in, not yet used (#65) |
+| `ios/arm64` | No avdevice; H.264 decodes on VideoToolbox (see Hardware decoding) |
 | `ios/arm64` with `-tags iossimulator` | The iOS simulator. The tag is required: Go has no separate GOOS for it |
-| `android/arm64`, `android/arm`, `android/amd64` | No avdevice; MediaCodec's H.264 decoder is built in, not yet used (#65); **no TLS, so `https` URLs cannot open** |
+| `android/arm64`, `android/arm`, `android/amd64` | No avdevice; H.264 decodes on MediaCodec (see Hardware decoding); **no TLS, so `https` URLs cannot open** |
 
 If your shell exports `CGO_CFLAGS` or `CGO_LDFLAGS` (common with Homebrew),
 unset them when cross-compiling. Otherwise a cross build can pick up host
 headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
+
+## Hardware decoding
+
+On iOS, H.264 video decodes on VideoToolbox by default. On Android it decodes
+on MediaCodec (`h264_mediacodec`) when the video is larger than 1280×720, and
+in software at that size and below, where MediaCodec costs more than it saves
+(measured below). Only 8-bit 4:2:0 streams in the Baseline, Main and High
+profiles go to the hardware. Anything else (High 4:4:4, 10-bit, other codecs)
+decodes in software, and so does a stream the hardware decoder will not open. If MediaCodec opens a stream and
+then fails before its first frame, the software decoder takes over from the
+start, with no frame lost. Frames come out the same either way: `GetRGBA`
+converts them as before.
+
+On desktop, video decodes in software unless you ask. The `GOFFMPEG_HWDECODE`
+environment variable, read when each input is opened, controls this:
+
+| `GOFFMPEG_HWDECODE` | |
+|---|---|
+| unset | hardware on iOS, and on Android above 1280×720; software elsewhere |
+| `0` | software everywhere |
+| `1` | as unset, and also VideoToolbox on macOS |
+| `force` | the hardware wherever the bridge has it, without the profile and size checks (for tests) |
+
+Measured in bellui's video player (#65, PR #70), process CPU in one core's
+terms. On an OPD2403 phone (Snapdragon 8 Gen 3, Android 16), with MediaCodec's
+own `media.hwcodec` process counted in: 1080p30 about 110% in software and
+96% with MediaCodec; 720×720 about 71% in software and 77% with MediaCodec,
+which also dropped a few frames where software dropped none. Hence the size
+threshold. On an iPad (10th generation), VideoToolbox makes no measurable
+difference to the player's CPU at either size, with the same frames, byte for
+byte. On its own (no player), goffmpeg uses 10–17 points of a core less with
+it, which counts once frames go to the GPU as YUV.
 
 ## Backends
 
