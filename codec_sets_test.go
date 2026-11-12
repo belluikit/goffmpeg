@@ -25,6 +25,9 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 		switch runtime.GOOS {
 		case "darwin", "linux", "windows":
 			wantDecoders = append(wantDecoders, "mjpeg", "rawvideo") // webcams
+		case "android":
+			// MediaCodec's H.264 decoder (goffmpeg-libs#21), for #65.
+			wantDecoders = append(wantDecoders, "h264_mediacodec")
 		}
 	}
 	decoders, demuxers := builtComponents()
