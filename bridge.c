@@ -8,6 +8,7 @@
 #include <string.h>
 #ifdef __APPLE__
 #include <TargetConditionals.h>
+#include <dlfcn.h>
 #endif
 #ifdef __ANDROID__
 #include <pthread.h>
@@ -117,8 +118,11 @@ static void hw_seeked(Decoder *d) {
 // software decoder decodes either way, but this keeps the log clean and the
 // fallback for what nobody predicted.
 static int hw_suits(const AVCodecParameters *par) {
-    if (par->codec_id != AV_CODEC_ID_H264) return 0;
     if (par->format != AV_PIX_FMT_YUV420P && par->format != AV_PIX_FMT_YUVJ420P) return 0;
+    // VP9 and AV1 (#78): their 8-bit 4:2:0 profiles, which phones decode.
+    if (par->codec_id == AV_CODEC_ID_VP9) return par->profile == AV_PROFILE_VP9_0;
+    if (par->codec_id == AV_CODEC_ID_AV1) return par->profile == AV_PROFILE_AV1_MAIN;
+    if (par->codec_id != AV_CODEC_ID_H264) return 0;
     switch (par->profile) {
     case AV_PROFILE_H264_BASELINE:
     case AV_PROFILE_H264_CONSTRAINED_BASELINE:
@@ -189,7 +193,9 @@ static pthread_once_t mediacodec_vm_once = PTHREAD_ONCE_INIT;
 static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
     pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
-    const AVCodec *codec = avcodec_find_decoder_by_name("h264_mediacodec");
+    enum AVCodecID id = st->codecpar->codec_id;
+    const AVCodec *codec = avcodec_find_decoder_by_name(
+        id == AV_CODEC_ID_VP9 ? "vp9_mediacodec" : id == AV_CODEC_ID_AV1 ? "av1_mediacodec" : "h264_mediacodec");
     if (!codec) return NULL;
     struct DecoderHW *hw = av_mallocz(sizeof(*hw));
     AVCodecContext *ctx = hw ? avcodec_alloc_context3(codec) : NULL;
@@ -230,8 +236,26 @@ static enum AVPixelFormat vt_get_format(AVCodecContext *ctx, const enum AVPixelF
     return AV_PIX_FMT_NONE;
 }
 
+// vt_hardware reports whether VideoToolbox decodes a codec in hardware on this
+// device. FFmpeg's av1 decoder has no software path, so VideoToolbox is offered
+// AV1 only where it decodes it; VP9 the same, since a software VP9 there is
+// FFmpeg's own vp9 again. The iPad (10th generation, A14) has neither, measured
+// on #77. VTIsHardwareDecodeSupported is looked up rather than linked:
+// VideoToolbox is in the process through libavcodec.
+static int vt_hardware(enum AVCodecID id) {
+    unsigned char (*supported)(uint32_t) =
+        (unsigned char (*)(uint32_t))dlsym(RTLD_DEFAULT, "VTIsHardwareDecodeSupported");
+    uint32_t type = id == AV_CODEC_ID_VP9 ? 0x76703039 /* 'vp09' */ : 0x61763031; /* 'av01' */
+    return supported && supported(type);
+}
+
 static AVCodecContext *open_videotoolbox(Decoder *d, AVStream *st) {
-    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    enum AVCodecID id = st->codecpar->codec_id;
+    if ((id == AV_CODEC_ID_VP9 || id == AV_CODEC_ID_AV1) && !vt_hardware(id)) return NULL;
+    // The codec's own FFmpeg decoder, which VideoToolbox's hwaccel runs in:
+    // av1, not dav1d, which a lookup by codec ID returns.
+    const AVCodec *codec = avcodec_find_decoder_by_name(
+        id == AV_CODEC_ID_VP9 ? "vp9" : id == AV_CODEC_ID_AV1 ? "av1" : "h264");
     if (!codec) return NULL;
     AVBufferRef *device = NULL;
     if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, NULL, NULL, 0) < 0) return NULL;
@@ -269,7 +293,9 @@ static AVCodecContext *open_videotoolbox(Decoder *d, AVStream *st) {
 static AVCodecContext *open_video(Decoder *d, AVStream *st) {
     int mode = hw_mode();
     AVCodecContext *ctx = NULL;
-    if (st->codecpar->codec_id == AV_CODEC_ID_H264 && (mode == 2 || (mode == 1 && hw_suits(st->codecpar)))) {
+    enum AVCodecID id = st->codecpar->codec_id;
+    if ((id == AV_CODEC_ID_H264 || id == AV_CODEC_ID_VP9 || id == AV_CODEC_ID_AV1) &&
+        (mode == 2 || (mode == 1 && hw_suits(st->codecpar)))) {
 #ifdef __ANDROID__
         if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
             ctx = open_mediacodec(d, st);
@@ -384,9 +410,13 @@ static int receive_video(Decoder *d) { return receive(d->v_ctx, d->v_frame); }
 const char *decoder_video_decoder(Decoder *d) {
     if (!d || !d->v_ctx || !d->v_ctx->codec) return NULL;
 #ifndef GOFFMPEG_NO_VIDEO
-    if (d->hw && d->hw->kind == HW_VIDEOTOOLBOX && d->hw->confirmed) return "h264 (videotoolbox)";
+    enum AVCodecID id = d->v_ctx->codec_id;
+    if (d->hw && d->hw->kind == HW_VIDEOTOOLBOX && d->hw->confirmed)
+        return id == AV_CODEC_ID_VP9 ? "vp9 (videotoolbox)" : id == AV_CODEC_ID_AV1 ? "av1 (videotoolbox)" : "h264 (videotoolbox)";
     // After hw_fallback the state stays, with no kind.
-    if (d->hw && d->hw->kind == HW_NONE) return "h264 (after h264_mediacodec failed)";
+    if (d->hw && d->hw->kind == HW_NONE)
+        return id == AV_CODEC_ID_VP9 ? "vp9 (after vp9_mediacodec failed)" :
+               id == AV_CODEC_ID_AV1 ? "libdav1d (after av1_mediacodec failed)" : "h264 (after h264_mediacodec failed)";
 #endif
     return d->v_ctx->codec->name;
 }
