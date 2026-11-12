@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,15 +34,32 @@ func longMP3(t *testing.T) []byte {
 	return bytes.Repeat(frames, 180)
 }
 
-// stallingServer serves media over http, honouring Range, until stall is set;
-// from then on a response sends nothing more and waits for the client to go.
+// stallingServer serves media over http, honouring Range, but only what Open
+// needs: the first openBytes and the last tailBytes. A read of anything in
+// between sends nothing and waits for the client to go, so a Seek into the
+// middle or a Next past the start blocks on the server.
+//
+// The stall is by position, not by time (#61). It used to start when the test
+// set a flag after Open, and until then the server kept copying the file into
+// the connection. Linux's loopback buffers hold the whole 1.5 MB file, so the
+// decoder could read to the end, or seek within data already sent, without
+// ever blocking, and the tests failed their own precondition: 1 run in 50 on
+// native linux/arm64, more on CI and under emulation.
 type stallingServer struct {
 	*httptest.Server
-	stall atomic.Bool
 	// gone ends every stalled response, so a failing test can still finish.
 	gone     chan struct{}
 	goneOnce sync.Once
 }
+
+// openBytes is what Open may read from the start of longMP3: measured, it
+// needs between 8 and 16 KB (probing and the first frames), so 128 KB leaves
+// room for a build that probes more. tailBytes covers the ID3v1 check, which
+// reads the last 128 bytes.
+const (
+	openBytes = 128 << 10
+	tailBytes = 128
+)
 
 func (s *stallingServer) unstick() { s.goneOnce.Do(func() { close(s.gone) }) }
 
@@ -51,22 +67,32 @@ func newStallingServer(t *testing.T, media []byte) *stallingServer {
 	s := &stallingServer{gone: make(chan struct{})}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "media.mp3", time.Time{}, &stallReader{
-			ReadSeeker: bytes.NewReader(media), stall: &s.stall, ctx: r.Context(), gone: s.gone,
+			ReadSeeker: bytes.NewReader(media), ctx: r.Context(), gone: s.gone,
+			lo: openBytes, hi: int64(len(media)) - tailBytes,
 		})
 	}))
 	t.Cleanup(s.Close)
 	return s
 }
 
+// stallReader serves its ReadSeeker except for the bytes in [lo, hi), where a
+// read waits for the request to end or for gone. http.ServeContent seeks it to
+// the start of the requested range, so it tracks the position.
 type stallReader struct {
 	io.ReadSeeker
-	stall *atomic.Bool
-	ctx   context.Context
-	gone  chan struct{}
+	pos, lo, hi int64
+	ctx         context.Context
+	gone        chan struct{}
+}
+
+func (r *stallReader) Seek(offset int64, whence int) (int64, error) {
+	pos, err := r.ReadSeeker.Seek(offset, whence)
+	r.pos = pos
+	return pos, err
 }
 
 func (r *stallReader) Read(p []byte) (int, error) {
-	if r.stall.Load() {
+	if r.pos >= r.lo && r.pos < r.hi {
 		select {
 		case <-r.ctx.Done():
 			return 0, r.ctx.Err()
@@ -74,12 +100,13 @@ func (r *stallReader) Read(p []byte) (int, error) {
 			return 0, io.ErrUnexpectedEOF
 		}
 	}
-	// Small reads, so the server cannot have pushed most of the file into the
-	// socket before the stall.
-	if len(p) > 4096 {
-		p = p[:4096]
+	// Stop at lo, so the stalled bytes are never sent.
+	if r.pos < r.lo && int64(len(p)) > r.lo-r.pos {
+		p = p[:r.lo-r.pos]
 	}
-	return r.ReadSeeker.Read(p)
+	n, err := r.ReadSeeker.Read(p)
+	r.pos += int64(n)
+	return n, err
 }
 
 // interruptAfter runs op, trips Interrupt part way, then calls then (if not
@@ -134,7 +161,6 @@ func TestInterruptSeekOverHTTP(t *testing.T) {
 		t.Fatalf("duration %v s; the test needs a long file", d.Duration())
 	}
 
-	srv.stall.Store(true)
 	took, err := interruptAfter(t, d, func() error { return d.Seek(d.Duration() * 0.75) }, nil, srv.unstick)
 	t.Logf("Seek returned %v after Interrupt: %v", took, err)
 	if took > time.Second {
@@ -159,7 +185,6 @@ func TestInterruptNextOverHTTP(t *testing.T) {
 	}
 	defer d.Close()
 
-	srv.stall.Store(true)
 	took, err := interruptAfter(t, d, func() error {
 		for {
 			mt, err := d.Next()
