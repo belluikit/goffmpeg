@@ -45,6 +45,8 @@ type cDecoder struct {
 	reader_handle int64
 	swr_flushed   int32
 	interrupt     uintptr
+	// The hardware decoder's state (#65), a C allocation the bridge owns.
+	hw uintptr
 }
 
 // The bridge returns C int, which is 32 bits. These must be declared int32,
@@ -60,8 +62,10 @@ var (
 	decoder_open_opts_err func(d *cDecoder, url *byte, options *byte, averr *int32) int32
 	// nil against a libgoffmpeg older than #41; MissingDecoder then reads
 	// empty, and ErrNoDecoder names no codec.
-	decoder_missing     func(d *cDecoder, media int32) string
-	decoder_open_device func(d *cDecoder, format *byte, url *byte, options *byte) int32
+	decoder_missing func(d *cDecoder, media int32) string
+	// nil against a libgoffmpeg older than #65; videoDecoder then reads empty.
+	decoder_video_decoder func(d *cDecoder) string
+	decoder_open_device   func(d *cDecoder, format *byte, url *byte, options *byte) int32
 	// nil against a libgoffmpeg older than #5; openDeviceDecoder falls back to
 	// decoder_open_device and simply has no AVERROR to report.
 	decoder_open_device_err func(d *cDecoder, format *byte, url *byte, options *byte, averr *int32) int32
@@ -175,6 +179,9 @@ func init() {
 	}
 	if hasSymbol(lib, "decoder_missing") {
 		purego.RegisterLibFunc(&decoder_missing, lib, "decoder_missing")
+	}
+	if hasSymbol(lib, "decoder_video_decoder") {
+		purego.RegisterLibFunc(&decoder_video_decoder, lib, "decoder_video_decoder")
 	}
 
 	// Same probe for the device-open AVERROR out-param. Its absence is not
@@ -416,6 +423,15 @@ func openDeviceDecoder(format, url, options string) (IDecoder, error) {
 		return nil, openDeviceError(format, url, res, int(averr))
 	}
 	return d, nil
+}
+
+// videoDecoder is decoder_video_decoder: what decoded the last video frame
+// (#65), empty with no video or against an older libgoffmpeg.
+func (d *puregoDecoder) videoDecoder() string {
+	if decoder_video_decoder == nil {
+		return ""
+	}
+	return decoder_video_decoder(&d.d)
 }
 
 func (d *puregoDecoder) VideoInfo() VideoInfo {

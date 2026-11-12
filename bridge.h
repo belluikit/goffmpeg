@@ -58,6 +58,11 @@ typedef struct {
     // lives in Go memory, and FFmpeg holds the callback's opaque pointer for
     // the life of fmt_ctx, which cgo forbids for a Go pointer.
     int *interrupt;
+
+    // The hardware decoder's state (#65), allocated in C, or NULL when the
+    // video decodes in software. bridge.c owns the struct; nothing else reads
+    // it.
+    struct DecoderHW *hw;
 } Decoder;
 
 // NOTE: decoder_purego.go mirrors this struct field-for-field in Go, and the C
@@ -84,6 +89,22 @@ int decoder_setup_streams(Decoder *d);
 // with GOFFMPEG_NO_VIDEO names its video stream, which it never decodes. The
 // name is FFmpeg's, valid for the life of the process.
 const char *decoder_missing(Decoder *d, int media);
+
+// decoder_video_decoder names what decodes the video (#65): the codec's name
+// ("h264", "h264_mediacodec"), with " (videotoolbox)" added once a frame has
+// come out of VideoToolbox, and "h264 (after h264_mediacodec failed)" once
+// the software decoder has replaced MediaCodec. NULL when no video stream is open. The name says
+// which path the last frame took, so read it after a frame.
+//
+// The phone's hardware decoder is used by default on Android (MediaCodec, for
+// 8-bit 4:2:0 H.264 in the Baseline, Main and High profiles) and on iOS
+// (VideoToolbox's H.264 hwaccel). Elsewhere the video decodes in software. The
+// environment variable GOFFMPEG_HWDECODE, read at each open, changes that: "0"
+// decodes in software everywhere, "1" also tries the hardware on macOS, and
+// "force" skips the profile check (for tests). The software decoder takes over
+// when the hardware decoder will not open, and when MediaCodec fails before
+// its first frame, which it does for streams it opened but cannot decode.
+const char *decoder_video_decoder(Decoder *d);
 
 // decoder_open_opts opens a file or URL with per-open demuxer and protocol
 // options: a comma-separated "key=value" list in the same shape
