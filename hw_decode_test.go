@@ -159,34 +159,50 @@ func TestHardwareDecodeMatchesSoftware(t *testing.T) {
 
 // A stream MediaCodec cannot decode (High 4:4:4) is left to the software
 // decoder. By default the profile check keeps MediaCodec from it. With
-// "force", MediaCodec opens it and fails before its first frame, and the
-// software decoder takes over with the packets MediaCodec was sent: every
-// frame still arrives. VideoToolbox either decodes it or hands it to software
-// itself; the frames are the same either way.
+// "force", MediaCodec opens it and the software decoder takes over with the
+// packets MediaCodec was sent: every frame still arrives. VideoToolbox either
+// decodes it or hands it to software itself; the frames are the same either
+// way.
+//
+// MediaCodec gives up in one of two ways. Qualcomm's (OnePlus Pad 2) fails at
+// the first packet. MediaTek's (moto g power 2024) takes every packet and
+// returns nothing, with no error (#81). The bridge replaces a silent one at
+// the end of the input, which the 30-frame clip reaches first, or after
+// HW_PENDING_MAX (64) packets, which the 100-frame clip reaches first. With
+// only the first, the long clip would lose its frames past the 64th.
 func TestHardwareDecodeRefusedProfile(t *testing.T) {
 	if !hwPlatform() {
 		t.Skip("no hardware decoder in the bridge on " + runtime.GOOS)
 	}
-	const path = "testdata/sample_444.mp4" // H.264 High 4:4:4, yuv444p, 320x240, 30 frames
-	sw := hwDecodeAll(t, path, "0")
-	if len(sw.frames) != 30 {
-		t.Fatalf("software decoded %d frames of %s, want 30", len(sw.frames), path)
-	}
-	def := hwDecodeAll(t, path, "1")
-	sameFrames(t, "GOFFMPEG_HWDECODE=1", def, sw)
-	forced := hwDecodeAll(t, path, "force")
-	sameFrames(t, "GOFFMPEG_HWDECODE=force", forced, sw)
-	if def.decoder != "h264" || def.last != "h264" {
-		t.Errorf("GOFFMPEG_HWDECODE=1: decoded with %q to %q, want h264 (the profile check)", def.decoder, def.last)
-	}
-	if runtime.GOOS == "android" {
-		// MediaCodec opens a 320x240 High 4:4:4 stream and fails at the
-		// first frame (it refuses to configure a smaller one), so this is
-		// the fallback that sends the kept packets again.
-		const fell = "h264 (after h264_mediacodec failed)"
-		if forced.decoder != fell || forced.last != fell {
-			t.Errorf("force: decoded with %q to %q, want %q", forced.decoder, forced.last, fell)
-		}
+	for _, c := range []struct {
+		path   string
+		frames int
+	}{
+		{"testdata/sample_444.mp4", 30},       // H.264 High 4:4:4, yuv444p, 320x240
+		{"testdata/sample_444_long.mp4", 100}, // the same, past HW_PENDING_MAX
+	} {
+		t.Run(c.path, func(t *testing.T) {
+			sw := hwDecodeAll(t, c.path, "0")
+			if len(sw.frames) != c.frames {
+				t.Fatalf("software decoded %d frames of %s, want %d", len(sw.frames), c.path, c.frames)
+			}
+			def := hwDecodeAll(t, c.path, "1")
+			sameFrames(t, "GOFFMPEG_HWDECODE=1", def, sw)
+			forced := hwDecodeAll(t, c.path, "force")
+			sameFrames(t, "GOFFMPEG_HWDECODE=force", forced, sw)
+			if def.decoder != "h264" || def.last != "h264" {
+				t.Errorf("GOFFMPEG_HWDECODE=1: decoded with %q to %q, want h264 (the profile check)", def.decoder, def.last)
+			}
+			if runtime.GOOS == "android" {
+				// MediaCodec opens a 320x240 High 4:4:4 stream (it refuses
+				// to configure a smaller one), so this is the fallback
+				// that sends the kept packets again.
+				const fell = "h264 (after h264_mediacodec failed)"
+				if forced.decoder != fell || forced.last != fell {
+					t.Errorf("force: decoded with %q to %q, want %q", forced.decoder, forced.last, fell)
+				}
+			}
+		})
 	}
 }
 

@@ -53,6 +53,10 @@ static int receive(AVCodecContext *ctx, AVFrame *f);
 //    OPD2403), so it is offered only what hw_suits passes. In case it fails anyway
 //    before its first frame, the video packets sent to it are kept and are
 //    sent again to the software decoder that replaces it, so no frame is lost.
+//    Some fail silently instead: MediaTek's takes High 4:4:4 and returns
+//    nothing, without an error, to the end of the file (#81). So a MediaCodec
+//    that has given no frame after HW_PENDING_MAX packets, or by the end of
+//    the input, is replaced the same way.
 //    Its frames are nv12 in system memory.
 //
 //  - VideoToolbox (Apple) is a hwaccel of the software h264 decoder: the same
@@ -61,6 +65,10 @@ static int receive(AVCodecContext *ctx, AVFrame *f);
 //    the decoder carries on in software. Its frames are CVPixelBuffers, copied
 //    to nv12 in system memory by av_hwframe_transfer_data.
 enum { HW_NONE, HW_MEDIACODEC, HW_VIDEOTOOLBOX };
+// The most packets kept for a fallback, and the most MediaCodec is sent
+// without giving a frame before it is replaced (#81). A working MediaCodec
+// gives its first frame within 4 to 16 packets (OnePlus Pad 2, H.264 up to
+// 1080p, VP9, AV1; the count varies with timing).
 #define HW_PENDING_MAX 64
 
 struct DecoderHW {
@@ -314,8 +322,10 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
 
 // hw_keep keeps a copy of a video packet sent to MediaCodec before its first
 // frame, for hw_fallback. Past HW_PENDING_MAX it keeps no more: a decoder
-// that has not produced a frame by then is not starting late, and a fallback
-// after it loses the frames of the packets that were not kept.
+// that has not produced a frame by then is not starting late. MediaCodec is
+// replaced at that point (hw_silent), so it never gets past it; a
+// VideoToolbox in av1 could, and a fallback after it loses the frames of the
+// packets that were not kept.
 // hw_fragile reports a hardware decoder that has produced no frame yet and has
 // no software path of its own to fall back on: MediaCodec, and VideoToolbox
 // running in FFmpeg's av1 decoder, which only drives hardware. A VideoToolbox
@@ -346,7 +356,7 @@ static void hw_keep(Decoder *d, const AVPacket *pkt) {
 static int hw_fallback(Decoder *d) {
     AVCodecContext *sw = open_software_video(d->fmt_ctx->streams[d->v_stream_idx]);
     if (!sw) return -1;
-    av_log(d->v_ctx, AV_LOG_WARNING, "goffmpeg: the hardware decoder failed before its first frame; decoding in software\n");
+    av_log(d->v_ctx, AV_LOG_WARNING, "goffmpeg: the hardware decoder failed before its first frame (%d packets sent); decoding in software\n", d->hw->npending);
     avcodec_free_context(&d->v_ctx);
     d->v_ctx = sw;
     d->hw->failed_kind = d->hw->kind;
@@ -371,6 +381,15 @@ static int hw_replay(Decoder *d, AVPacket *pkt) {
     av_packet_move_ref(pkt, hw->pending[hw->next_replay++]);
     if (hw->next_replay == hw->npending) hw_drop_pending(hw);
     return 1;
+}
+
+// hw_silent reports a MediaCodec that has failed without saying so (#81): it
+// has given no frame and either has been sent HW_PENDING_MAX packets
+// (receive's "no frame yet", 0) or has drained to the end (AVERROR_EOF). At
+// the end it counts only when it was sent something to replay.
+static int hw_silent(const struct DecoderHW *hw, int ret) {
+    if (ret == 0) return hw->npending >= HW_PENDING_MAX;
+    return ret == AVERROR_EOF && hw->npending > 0;
 }
 
 // receive_video is receive for the video decoder, with the hardware's part:
@@ -415,8 +434,8 @@ static int receive_video(Decoder *d) {
         if (ret == 1) {
             hw->confirmed = 1;
             hw_drop_pending(hw);
-        } else if (ret < 0 && ret != AVERROR_EOF && hw_fallback(d) == 0) {
-            return 0;
+        } else if ((ret < 0 && ret != AVERROR_EOF) || hw_silent(hw, ret)) {
+            if (hw_fallback(d) == 0) return 0;
         }
     }
     return ret;
