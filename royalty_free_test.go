@@ -3,9 +3,7 @@
 package goffmpeg
 
 import (
-	"errors"
 	"image"
-	"strings"
 	"testing"
 )
 
@@ -27,18 +25,14 @@ func TestRoyaltyFreeFormats(t *testing.T) {
 		{"testdata/sample.opus", false, 0},
 	} {
 		t.Run(c.path, func(t *testing.T) {
-			skipWithoutDav1d(t, c.path)
 			dec, err := Open(c.path)
-			if errors.Is(err, ErrUnrecognizedInput) || errors.Is(err, ErrNoDecoder) {
-				t.Skipf("the loaded FFmpeg predates #78: %v", err)
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer dec.Close()
 			vi, ai := dec.VideoInfo(), dec.AudioInfo()
 			if vi.MissingDecoder != "" || ai.MissingDecoder != "" {
-				t.Skipf("the loaded FFmpeg predates #78: no decoder for video %q, audio %q", vi.MissingDecoder, ai.MissingDecoder)
+				t.Fatalf("no decoder for video %q, audio %q", vi.MissingDecoder, ai.MissingDecoder)
 			}
 			if c.video && (vi.Width != 320 || vi.Height != 240) {
 				t.Errorf("video %dx%d, want 320x240", vi.Width, vi.Height)
@@ -84,35 +78,5 @@ func TestRoyaltyFreeFormats(t *testing.T) {
 				t.Errorf("%d audio samples, want about 96000", samples)
 			}
 		})
-	}
-}
-
-// skipWithoutDav1d skips an AV1 test against an FFmpeg with no software AV1
-// decoder. goffmpeg-libs v0.8.2 and earlier have none: a lookup by codec ID
-// then finds FFmpeg's own av1 decoder, which only drives hardware, and
-// decoding fails ("function not implemented") wherever the hardware path is
-// off or absent. From the goffmpeg-libs release with #78, dav1d is found
-// first; drop this when go.mod requires it.
-func skipWithoutDav1d(t *testing.T, path string) {
-	t.Helper()
-	if !strings.Contains(path, "av1") {
-		return
-	}
-	dec, err := Open(path)
-	if err != nil {
-		return // the test reports or skips that itself
-	}
-	defer dec.Close()
-	for i := 0; i < 50; i++ {
-		mt, err := dec.Next()
-		if err != nil {
-			if dec.(interface{ videoDecoder() string }).videoDecoder() == "av1" {
-				t.Skipf("the loaded FFmpeg has no software AV1 decoder (dav1d, #78): %v", err)
-			}
-			return
-		}
-		if mt == MediaTypeVideo || mt == MediaTypeNone {
-			return
-		}
 	}
 }
