@@ -100,7 +100,8 @@ decoded, with no conversion, for a caller that converts to RGB on the GPU
 (#64). It also returns the frame's colour matrix (BT.601, BT.709 or BT.2020) and
 range, and says when the matrix is a guess from the frame's height because the
 stream does not state it. It copies 8-bit 4:2:0 only, which is nearly all H.264,
-HEVC and VP9. Any other format returns `ErrPixelFormat` naming it, and
+HEVC and VP9, planar or as the phones' hardware decoders deliver it (`nv12`,
+split into `Cb` and `Cr`). Any other format returns `ErrPixelFormat` naming it, and
 `GetRGBA` still converts it. Under `CGO_ENABLED=0` it needs a libgoffmpeg
 that exports `decoder_get_yuv`.
 

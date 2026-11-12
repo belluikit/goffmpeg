@@ -223,3 +223,81 @@ func TestHardwareDecodeSeek(t *testing.T) {
 		t.Error("no decoder name after the seek")
 	}
 }
+
+type planes struct {
+	frames  [][]byte
+	infos   []YCbCrInfo
+	decoder string
+}
+
+// hwPlanes opens path with GOFFMPEG_HWDECODE=mode and reads every video frame
+// with GetYCbCr.
+func hwPlanes(t *testing.T, path, mode string) planes {
+	t.Helper()
+	t.Setenv("GOFFMPEG_HWDECODE", mode)
+	dec, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", path, err)
+	}
+	defer dec.Close()
+	info := dec.VideoInfo()
+	var out planes
+	for i := 0; i < 5000; i++ {
+		mt, err := dec.Next()
+		if err != nil {
+			t.Fatalf("GOFFMPEG_HWDECODE=%s %s: Next: %v", mode, path, err)
+		}
+		if mt == MediaTypeNone {
+			break
+		}
+		if mt != MediaTypeVideo {
+			continue
+		}
+		img := image.NewYCbCr(image.Rect(0, 0, info.Width, info.Height), image.YCbCrSubsampleRatio420)
+		yi, err := dec.(YCbCrDecoder).GetYCbCr(img)
+		if err != nil {
+			t.Fatalf("GOFFMPEG_HWDECODE=%s %s: frame %d: GetYCbCr: %v", mode, path, len(out.frames), err)
+		}
+		if out.frames == nil {
+			out.decoder = dec.(interface{ videoDecoder() string }).videoDecoder()
+		}
+		out.frames = append(out.frames, packed(img))
+		out.infos = append(out.infos, yi)
+	}
+	return out
+}
+
+// GetYCbCr hands out a hardware decoder's frames too: they are nv12, whose
+// interleaved chroma is split into Cb and Cr, and they come out byte for byte
+// as software decoding gives them, with the same matrix and range.
+func TestHardwareDecodeYCbCr(t *testing.T) {
+	if !hwPlatform() {
+		t.Skip("no hardware decoder in the bridge on " + runtime.GOOS)
+	}
+	for _, path := range []string{
+		"testdata/sample.mp4",           // 320x240, untagged
+		"testdata/yuv/bt709_tv.mp4",     // 64x64, BT.709 limited range
+		"testdata/yuv/smpte170m_pc.mp4", // 64x64, BT.601 full range (yuvj420p)
+	} {
+		sw := hwPlanes(t, path, "0")
+		hw := hwPlanes(t, path, "1")
+		t.Logf("%s: %d frames, hardware run decoded by %q", path, len(hw.frames), hw.decoder)
+		if len(hw.frames) != len(sw.frames) {
+			t.Errorf("%s: %d frames with the hardware, %d in software", path, len(hw.frames), len(sw.frames))
+			continue
+		}
+		for i := range sw.frames {
+			if string(hw.frames[i]) != string(sw.frames[i]) {
+				t.Errorf("%s: frame %d: planes differ from software's", path, i)
+				break
+			}
+			if hw.infos[i] != sw.infos[i] {
+				t.Errorf("%s: frame %d: %+v with the hardware, %+v in software", path, i, hw.infos[i], sw.infos[i])
+				break
+			}
+		}
+		if path == "testdata/sample.mp4" {
+			requireHardware(t, decoded{decoder: hw.decoder, last: hw.decoder})
+		}
+	}
+}

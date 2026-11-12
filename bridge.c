@@ -754,10 +754,25 @@ int decoder_get_yuv(Decoder *d, uint8_t *y, int y_stride, uint8_t *u, uint8_t *v
     AVFrame *f = d->v_frame;
     if (f->width <= 0 || f->height <= 0 || f->format == AV_PIX_FMT_NONE) return -1;
     if (f->width != d->width || f->height != d->height) return -2;
-    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) return -3;
+    int nv12 = f->format == AV_PIX_FMT_NV12;
+    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P && !nv12) return -3;
 
     int cw = (f->width + 1) / 2, ch = (f->height + 1) / 2;
     av_image_copy_plane(y, y_stride, f->data[0], f->linesize[0], f->width, f->height);
+    if (nv12) {
+        // What the phones' hardware decoders deliver (#65): the same 4:2:0
+        // samples, with Cb and Cr interleaved in one plane. They are split
+        // into the caller's two planes as they are copied.
+        for (int r = 0; r < ch; r++) {
+            const uint8_t *src = f->data[1] + (ptrdiff_t)r * f->linesize[1];
+            uint8_t *du = u + (ptrdiff_t)r * c_stride, *dv = v + (ptrdiff_t)r * c_stride;
+            for (int c = 0; c < cw; c++) {
+                du[c] = src[2 * c];
+                dv[c] = src[2 * c + 1];
+            }
+        }
+        return 0;
+    }
     av_image_copy_plane(u, c_stride, f->data[1], f->linesize[1], cw, ch);
     av_image_copy_plane(v, c_stride, f->data[2], f->linesize[2], cw, ch);
     return 0;
