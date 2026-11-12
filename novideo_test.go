@@ -49,6 +49,10 @@ func TestNoVideoDecodesAudioOnly(t *testing.T) {
 	if err := dec.GetRGBA(image.NewRGBA(image.Rect(0, 0, 2, 2))); !errors.Is(err, ErrVideoNotBuilt) {
 		t.Errorf("GetRGBA: %v, want ErrVideoNotBuilt", err)
 	}
+	img := image.NewYCbCr(image.Rect(0, 0, 2, 2), image.YCbCrSubsampleRatio420)
+	if _, err := dec.(YCbCrDecoder).GetYCbCr(img); !errors.Is(err, ErrVideoNotBuilt) {
+		t.Errorf("GetYCbCr: %v, want ErrVideoNotBuilt", err)
+	}
 }
 
 // An input with nothing an audio-only build decodes, a video with no audio,

@@ -2,6 +2,7 @@
 #include <libavutil/mem.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/log.h>
+#include <libavutil/pixdesc.h>
 
 // find_video_stream is av_find_best_stream for video, minus attached pictures.
 // The cover art an MP3, M4A or FLAC embeds is a one-packet video stream, and
@@ -409,6 +410,61 @@ int decoder_get_rgba(Decoder *d, uint8_t *buffer) {
     return sws_scale(d->sws_ctx, (const uint8_t * const*)d->v_frame->data, d->v_frame->linesize,
                      0, d->v_frame->height, dst_data, dst_linesize);
 #endif
+}
+
+// decoder_get_yuv copies the current video frame's planes into the caller's,
+// unconverted, for a caller that converts to RGB itself, as a GPU shader does
+// (#64). Only 8-bit 4:2:0 planar frames are copied (yuv420p and yuvj420p),
+// which is what the H.264, HEVC and VP9 software decoders produce for nearly
+// all video. The caller sizes its planes for the decoder's frame: y holds
+// height rows of y_stride bytes, u and v (height+1)/2 rows of c_stride bytes,
+// and each row at least as wide as its plane.
+//
+// Returns 0; -1 with no frame; -2 when the frame's size is not the size the
+// decoder opened with, as in decoder_get_rgba; -3 for any other pixel format,
+// which decoder_frame_pix_fmt names; -8 in a build without video.
+int decoder_get_yuv(Decoder *d, uint8_t *y, int y_stride, uint8_t *u, uint8_t *v, int c_stride) {
+#ifdef GOFFMPEG_NO_VIDEO
+    (void)d; (void)y; (void)y_stride; (void)u; (void)v; (void)c_stride;
+    return -8;
+#else
+    if (!d->v_frame) return -1;
+    AVFrame *f = d->v_frame;
+    if (f->width <= 0 || f->height <= 0 || f->format == AV_PIX_FMT_NONE) return -1;
+    if (f->width != d->width || f->height != d->height) return -2;
+    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) return -3;
+
+    int cw = (f->width + 1) / 2, ch = (f->height + 1) / 2;
+    av_image_copy_plane(y, y_stride, f->data[0], f->linesize[0], f->width, f->height);
+    av_image_copy_plane(u, c_stride, f->data[1], f->linesize[1], cw, ch);
+    av_image_copy_plane(v, c_stride, f->data[2], f->linesize[2], cw, ch);
+    return 0;
+#endif
+}
+
+// decoder_frame_colorspace is the current video frame's AVColorSpace, the
+// matrix that turns its YUV into RGB, or AVCOL_SPC_UNSPECIFIED when the stream
+// does not say, which most files do not.
+int decoder_frame_colorspace(Decoder *d) {
+    if (!d->v_frame) return AVCOL_SPC_UNSPECIFIED;
+    return d->v_frame->colorspace;
+}
+
+// decoder_frame_full_range reports whether the current video frame uses the
+// full 0-255 range rather than the limited 16-235 one: its color_range says
+// so, or its pixel format is one of the JPEG ("yuvj") formats, which imply it.
+int decoder_frame_full_range(Decoder *d) {
+    if (!d->v_frame) return 0;
+    if (d->v_frame->color_range == AVCOL_RANGE_JPEG) return 1;
+    return d->v_frame->format == AV_PIX_FMT_YUVJ420P || d->v_frame->format == AV_PIX_FMT_YUVJ422P ||
+           d->v_frame->format == AV_PIX_FMT_YUVJ444P;
+}
+
+// decoder_frame_pix_fmt names the current video frame's pixel format
+// ("yuv420p"), or returns NULL with no frame.
+const char *decoder_frame_pix_fmt(Decoder *d) {
+    if (!d->v_frame || d->v_frame->format == AV_PIX_FMT_NONE) return NULL;
+    return av_get_pix_fmt_name((enum AVPixelFormat)d->v_frame->format);
 }
 
 int decoder_get_audio(Decoder *d, uint8_t **buffer) {

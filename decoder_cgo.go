@@ -192,6 +192,31 @@ func (d *cgoDecoder) GetRGBA(rgba *image.RGBA) error {
 	return rgbaResult(int(C.decoder_get_rgba(&d.d, (*C.uint8_t)(unsafe.Pointer(&rgba.Pix[0])))), info)
 }
 
+var _ YCbCrDecoder = (*cgoDecoder)(nil)
+
+func (d *cgoDecoder) GetYCbCr(dst *image.YCbCr) (YCbCrInfo, error) {
+	if d.d.v_frame == nil {
+		// No video stream, or a build without video: the bridge says which
+		// (ErrNoFrame or ErrVideoNotBuilt) before any destination is read.
+		return YCbCrInfo{}, yuvResult(int(C.decoder_get_yuv(&d.d, nil, 0, nil, nil, 0)), "")
+	}
+	w, h := int(d.d.width), int(d.d.height)
+	if err := checkYCbCr(dst, w, h); err != nil {
+		return YCbCrInfo{}, err
+	}
+	res := int(C.decoder_get_yuv(&d.d,
+		(*C.uint8_t)(unsafe.Pointer(&dst.Y[0])), C.int(dst.YStride),
+		(*C.uint8_t)(unsafe.Pointer(&dst.Cb[0])), (*C.uint8_t)(unsafe.Pointer(&dst.Cr[0])), C.int(dst.CStride)))
+	if res != 0 {
+		var name string
+		if p := C.decoder_frame_pix_fmt(&d.d); p != nil {
+			name = C.GoString(p)
+		}
+		return YCbCrInfo{}, yuvResult(res, name)
+	}
+	return colorInfo(int(C.decoder_frame_colorspace(&d.d)), C.decoder_frame_full_range(&d.d) != 0, h), nil
+}
+
 func (d *cgoDecoder) GetAudio() ([]byte, error) {
 	var ptr *C.uint8_t
 	size := C.decoder_get_audio(&d.d, &ptr)
