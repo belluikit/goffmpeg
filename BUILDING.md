@@ -35,10 +35,15 @@ Needed when bumping FFmpeg or changing its configuration:
 ```sh
 git clone https://github.com/FFmpeg/FFmpeg.git ../ffmpeg
 git -C ../ffmpeg checkout --detach e2bc6d88cd68184288c16570e04881c3a426a05a
+git clone --depth 1 --branch 1.5.2 https://code.videolan.org/videolan/dav1d.git ../dav1d
 make dist TARGET=linux_amd64            # the media codec set, into shared/
 make dist TARGET=linux_amd64 SET=audio  # the audio codec set, into shared-audio/
 make sync-libs TARGET=linux_amd64       # copy both into ../goffmpeg-libs, write its link files
 ```
+
+The media set builds dav1d first (`make dav1d`, `scripts/build-dav1d.sh`), with
+meson and ninja, and links it into libavcodec statically (#78). dav1d is
+BSD-2-Clause; the build fails if it comes out without its assembly.
 
 `make dist` alone builds the host target; `make dist-all` builds everything this
 machine can produce without a container. `make sync-headers` refreshes the
@@ -219,6 +224,7 @@ that were skipping on `Err*Unavailable` should start running.
 
 | TARGET | Toolchain required | Notes |
 |---|---|---|
+| every target | meson, ninja | For dav1d, in the media set |
 | `darwin_arm64` | Xcode CLT | Committed. VideoToolbox + avfoundation capture |
 | `darwin_amd64` | Xcode CLT, nasm | Cross-compiled from arm64 via `clang -arch x86_64` |
 | `ios_arm64` | Xcode iPhoneOS SDK | No avdevice; VideoToolbox hardware decode |
@@ -294,9 +300,9 @@ avfilter are off in both: this library only ever decodes.
 
 | Set | Targets | Decoders | Demuxers | Where |
 |---|---|---|---|---|
-| **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has (478) | every one (360) | `shared/`, `-goffmpeg` |
-| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`; on Android also `h264_mediacodec` | `mp3`, `wav`, `mov`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
-| **audio** | every target | `mp3float`, the same PCM | `mp3`, `wav` | `shared-audio/`, `-goffmpeg-audio` |
+| **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has, plus dav1d (`libdav1d`) | every one | `shared/`, `-goffmpeg` |
+| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`, `vp9`, `libdav1d`, `av1`, `opus`; on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
+| **audio** | every target | `mp3float`, the same PCM, `opus` | `mp3`, `wav`, `ogg` | `shared-audio/`, `-goffmpeg-audio` |
 
 On the phones the media set decodes only what apps play, so an app carries no
 codec it doesn't need, and none of the patent-encumbered ones unless it plays
@@ -304,9 +310,9 @@ them. Desktop keeps every codec (the owner's choice on #41). The audio set has
 no libswscale and no libavdevice, on every target; goffmpeg links it under the
 `goffmpeg_novideo` tag.
 
-On the phones, the media set enables VideoToolbox's H.264 hwaccel (iOS) and no
-other, has the parsers its formats need (`mpegaudio`, `h264`, `aac`, and `ac3`,
-which `hls` selects) and no bitstream filter that isn't selected by something
+On the phones, the media set enables VideoToolbox's H.264, VP9 and AV1
+hwaccels (iOS) and no other, has the parsers its formats need (`mpegaudio`,
+`h264`, `aac`, `vp9`, `av1`, `opus`, and `ac3`, which `hls` selects) and no bitstream filter that isn't selected by something
 it keeps. On Android it also has MediaCodec's H.264 decoder, `h264_mediacodec`
 (goffmpeg-libs#21), which selects the `h264_mp4toannexb` filter. MediaCodec is
 a decoder of its own rather than a hwaccel, and FFmpeg registers it after the
@@ -316,8 +322,9 @@ one input device, the one that reads cameras on each OS (`avfoundation`,
 `v4l2`, `dshow`): the rest aren't used. Every protocol stays, so `http`, and
 `https` where the target has TLS, still open.
 
-On android_arm64 the libraries come to 4.7 MB for the media set and 1.7 MB for
-the audio set, against 14.4 MB for an every-codec build.
+On android_arm64 the libraries come to 6.6 MB for the media set and 2.0 MB for
+the audio set, against 14.4 MB for an every-codec build. VP9, AV1 (dav1d) and
+Opus added 1.7 MB and 0.2 MB to them (#78).
 
 **The sets are enforced, not only configured.** `configure` turns on whatever
 an enabled component selects, so a flag that asks for one decoder can bring

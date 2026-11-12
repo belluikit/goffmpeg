@@ -32,6 +32,11 @@ env:
   # Pinned so every target is built from identical sources. Bump deliberately.
   FFMPEG_REPO: https://github.com/FFmpeg/FFmpeg.git
   FFMPEG_REF: e2bc6d88cd68184288c16570e04881c3a426a05a
+  # dav1d, the AV1 decoder built into the media set's libavcodec (#78): release
+  # 1.5.2, by commit, beside FFmpeg.
+  DAV1D_REPO: https://code.videolan.org/videolan/dav1d.git
+  DAV1D_TAG: "1.5.2"
+  DAV1D_REF: c720f4d3556a01916324aea155555d3efba842e8
   # llvm-mingw, the toolchain for windows_arm64. Pinned with its digest from
   # the release, so a replaced asset fails the download instead of the build.
   LLVM_MINGW_TAG: "20261006"
@@ -158,12 +163,15 @@ jobs:
       # FFmpeg's x86 assembly (darwin_amd64, android_amd64) needs nasm, which
       # the image does not carry.
       - name: Install build tools
-        run: brew install nasm
+        run: brew install nasm meson ninja
 
-      - name: Fetch FFmpeg
+      - name: Fetch FFmpeg and dav1d
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
+          rm -rf ../dav1d && git clone --depth 1 --branch "$DAV1D_TAG" "$DAV1D_REPO" ../dav1d
+          test "$(git -C ../dav1d rev-parse HEAD)" = "$DAV1D_REF" \
+            || { echo "::error::dav1d $DAV1D_TAG is not $DAV1D_REF"; exit 1; }
 
       # The NDK's prebuilt host directory is darwin-x86_64 even on arm64 hosts
       # (the binaries are universal); fail here, by name, if that ever changes.
@@ -327,7 +335,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            nasm pkg-config libssl-dev patch mingw-w64
+            nasm pkg-config libssl-dev patch mingw-w64 meson ninja-build
 
       # Windows on ARM needs llvm-mingw; the distro's mingw-w64 only targets x86.
       - name: Install llvm-mingw
@@ -344,10 +352,13 @@ jobs:
           sudo tar -xJf "$RUNNER_TEMP/$ASSET" -C /opt/llvm-mingw --strip-components=1
           /opt/llvm-mingw/bin/aarch64-w64-mingw32-gcc --version
 
-      - name: Fetch FFmpeg
+      - name: Fetch FFmpeg and dav1d
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
+          rm -rf ../dav1d && git clone --depth 1 --branch "$DAV1D_TAG" "$DAV1D_REPO" ../dav1d
+          test "$(git -C ../dav1d rev-parse HEAD)" = "$DAV1D_REF" \
+            || { echo "::error::dav1d $DAV1D_TAG is not $DAV1D_REF"; exit 1; }
 
       # The shared libraries, as in the apple-android job. On Windows,
       # check-shared also refuses a DLL that imports one Windows does not ship.
@@ -666,10 +677,13 @@ jobs:
         with:
           go-version: stable
 
-      - name: Fetch FFmpeg
+      - name: Fetch FFmpeg and dav1d
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
+          rm -rf ../dav1d && git clone --depth 1 --branch "$DAV1D_TAG" "$DAV1D_REPO" ../dav1d
+          test "$(git -C ../dav1d rev-parse HEAD)" = "$DAV1D_REF" \
+            || { echo "::error::dav1d $DAV1D_TAG is not $DAV1D_REF"; exit 1; }
 
       # Built on Ubuntu 22.04, whose glibc 2.35 is the oldest goffmpeg supports
       # (#44): a shared library needs at least the glibc it was built against,

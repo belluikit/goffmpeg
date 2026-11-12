@@ -91,21 +91,24 @@ int decoder_setup_streams(Decoder *d);
 const char *decoder_missing(Decoder *d, int media);
 
 // decoder_video_decoder names what decodes the video (#65): the codec's name
-// ("h264", "h264_mediacodec"), with " (videotoolbox)" added once a frame has
-// come out of VideoToolbox, and "h264 (after h264_mediacodec failed)" once
-// the software decoder has replaced MediaCodec. NULL when no video stream is open. The name says
-// which path the last frame took, so read it after a frame.
+// ("h264", "vp9", "libdav1d", "h264_mediacodec", "av1_mediacodec"), with
+// " (videotoolbox)" added once a frame has come out of VideoToolbox (as in
+// "vp9 (videotoolbox)"), and "<software> (after <mediacodec> failed)" once the
+// software decoder has replaced MediaCodec. NULL when no video stream is open.
+// The name says which path the last frame took, so read it after a frame.
 //
-// The phone's hardware decoder is used by default for 8-bit 4:2:0 H.264 in
-// the Baseline, Main and High profiles: on iOS VideoToolbox's H.264 hwaccel,
-// and on Android MediaCodec, only for frames larger than 1280x720, below which
-// it costs more than it saves (MEDIACODEC_MIN_PIXELS in bridge.c). Elsewhere
-// the video decodes in software. The environment variable GOFFMPEG_HWDECODE,
-// read at each open, changes that: "0" decodes in software everywhere, "1"
-// also tries the hardware on macOS, and "force" skips the profile and size
-// checks (for tests). The software decoder takes over
-// when the hardware decoder will not open, and when MediaCodec fails before
-// its first frame, which it does for streams it opened but cannot decode.
+// The phone's hardware decoder is used by default for H.264, VP9 and AV1 (#78)
+// in their 8-bit 4:2:0 profiles (H.264 Baseline, Main and High; VP9 profile 0;
+// AV1 Main): on iOS through VideoToolbox, for VP9 and AV1 only where the device
+// decodes them in hardware; on Android through MediaCodec, only for frames
+// larger than 1280x720, below which it costs more than it saves
+// (MEDIACODEC_MIN_PIXELS in bridge.c). Elsewhere the video decodes in software
+// (FFmpeg's h264 and vp9, and dav1d for AV1). The environment variable
+// GOFFMPEG_HWDECODE, read at each open, changes that: "0" decodes in software
+// everywhere, "1" also tries the hardware on macOS, and "force" skips the
+// profile and size checks (for tests). The software decoder takes over when the
+// hardware decoder will not open, and when MediaCodec fails before its first
+// frame, which it does for streams it opened but cannot decode.
 const char *decoder_video_decoder(Decoder *d);
 
 // decoder_open_opts opens a file or URL with per-open demuxer and protocol

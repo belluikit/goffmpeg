@@ -145,3 +145,34 @@ func TestNoVideoLinksTheAudioSet(t *testing.T) {
 		t.Error("an audio-only build imports libavdevice")
 	}
 }
+
+// The audio set plays Opus in Ogg too (#78), beside MP3 and WAV.
+func TestAudioSetPlaysOpus(t *testing.T) {
+	dec, err := Open("testdata/sample.opus")
+	if errors.Is(err, ErrUnrecognizedInput) || errors.Is(err, ErrNoDecoder) {
+		t.Skipf("the loaded FFmpeg predates #78: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	if ai := dec.AudioInfo(); ai.SampleRate != 48000 || ai.MissingDecoder != "" {
+		t.Fatalf("audio %+v, want 48000 Hz and a decoder", ai)
+	}
+	samples := 0
+	for {
+		mt, err := dec.Next()
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if mt == MediaTypeNone {
+			break
+		}
+		if b, err := dec.GetAudio(); err == nil {
+			samples += len(b) / 2 / max(dec.AudioInfo().Channels, 1)
+		}
+	}
+	if samples < 90000 || samples > 100000 {
+		t.Errorf("%d samples, want about 96000 (two seconds at 48 kHz)", samples)
+	}
+}
