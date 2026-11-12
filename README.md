@@ -162,9 +162,9 @@ matching goffmpeg-libs module:
 | `darwin/arm64`, `darwin/amd64` | avfoundation capture; VideoToolbox H.264 decode with `GOFFMPEG_HWDECODE=1` (see below) |
 | `linux/amd64`, `linux/arm64` | v4l2 capture; OpenSSL for https |
 | `windows/amd64`, `windows/arm64` | dshow capture; Schannel for TLS |
-| `ios/arm64` | No avdevice; H.264 decodes on VideoToolbox (see Hardware decoding) |
+| `ios/arm64` | No avdevice; H.264 decodes on VideoToolbox, and VP9 and AV1 where the device decodes them in hardware (see Hardware decoding) |
 | `ios/arm64` with `-tags iossimulator` | The iOS simulator. The tag is required: Go has no separate GOOS for it |
-| `android/arm64`, `android/arm`, `android/amd64` | No avdevice; H.264 decodes on MediaCodec (see Hardware decoding); **no TLS, so `https` URLs cannot open** |
+| `android/arm64`, `android/arm`, `android/amd64` | No avdevice; H.264, VP9 and AV1 decode on MediaCodec (see Hardware decoding); **no TLS, so `https` URLs cannot open** |
 
 If your shell exports `CGO_CFLAGS` or `CGO_LDFLAGS` (common with Homebrew),
 unset them when cross-compiling. Otherwise a cross build can pick up host
@@ -172,11 +172,14 @@ headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
 
 ## Hardware decoding
 
-On iOS, H.264 video decodes on VideoToolbox by default. On Android it decodes
-on MediaCodec (`h264_mediacodec`) when the video is larger than 1280×720, and
-in software at that size and below, where MediaCodec costs more than it saves
-(measured below). Only 8-bit 4:2:0 streams in the Baseline, Main and High
-profiles go to the hardware. Anything else (High 4:4:4, 10-bit, other codecs)
+On iOS, H.264 video decodes on VideoToolbox by default, and VP9 and AV1 do
+where the device decodes them in hardware (an iPad of the 10th generation does
+neither, and decodes them in software). On Android H.264, VP9 and AV1 decode on
+MediaCodec (`h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec`) when the
+video is larger than 1280×720, and in software at that size and below, where
+MediaCodec costs more than it saves (measured below). Only 8-bit 4:2:0 streams
+go to the hardware: H.264 Baseline, Main and High, VP9 profile 0, AV1 Main.
+Anything else (High 4:4:4, 10-bit, other codecs)
 decodes in software, and so does a stream the hardware decoder will not open. If MediaCodec opens a stream and
 then fails before its first frame, the software decoder takes over from the
 start, with no frame lost. Frames come out the same either way: `GetRGBA`
@@ -229,18 +232,21 @@ goffmpeg's FFmpeg comes in two codec sets (#41):
 | Set | Plays | Linked by |
 |---|---|---|
 | **media**, desktop (macOS, Linux, Windows) | every format FFmpeg decodes; webcam capture | default |
-| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`) and HLS with H.264 video and AAC audio | default |
-| **audio**, every platform | MP3 and WAV | `-tags goffmpeg_novideo` |
+| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`), WebM, Ogg and HLS, with H.264, VP9 and AV1 video and AAC and Opus audio | default |
+| **audio**, every platform | MP3, WAV and Opus (Ogg, `.opus`) | `-tags goffmpeg_novideo` |
 
-On the phones, anything else (FLAC, Ogg, HEVC, VP9 and so on) isn't built,
+VP9, AV1 and Opus are there for apps that move their content to royalty-free
+formats (#78). AV1 decodes in software through dav1d, built into libavcodec on
+every platform, desktop included: FFmpeg's own AV1 decoder only drives
+hardware. On the phones, anything else (FLAC, Vorbis, HEVC and so on) isn't built,
 and opening it says so ("When a build can't decode something", below). The
 exact lists are in [BUILDING.md](BUILDING.md#what-is-in-the-build).
 
 ## Audio only
 
-`-tags goffmpeg_novideo` builds the cgo backend against the audio set: MP3 and
-WAV, with no libswscale and no libavdevice, on every platform, so an app ships
-1.7 MB of FFmpeg where the phone media set is 4.7 MB (android_arm64). No video frame arrives,
+`-tags goffmpeg_novideo` builds the cgo backend against the audio set: MP3,
+WAV and Opus, with no libswscale and no libavdevice, on every platform, so an
+app ships 2.0 MB of FFmpeg where the phone media set is 6.6 MB (android_arm64). No video frame arrives,
 `GetRGBA` returns `ErrVideoNotBuilt`, and there's no capture: `OpenDevice`
 says the build has no libavdevice. An MP4 fails to open with
 `ErrUnrecognizedInput`. The tag doesn't change the purego backend, which loads

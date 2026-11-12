@@ -354,3 +354,29 @@ func TestHardwareDecodeSizeThreshold(t *testing.T) {
 		}
 	}
 }
+
+// VP9 and AV1 through the hardware path (#78): with GOFFMPEG_HWDECODE=force
+// the frames are software's (FFmpeg's vp9, and dav1d for AV1), byte for byte,
+// whichever decoder the platform has. The hardware varies by device, the iPad
+// (10th generation) has none for either, so this logs which decoder ran
+// rather than requiring one.
+func TestHardwareDecodeRoyaltyFree(t *testing.T) {
+	if !hwPlatform() {
+		t.Skip("no hardware decoder in the bridge on " + runtime.GOOS)
+	}
+	for _, path := range []string{"testdata/sample_vp9.webm", "testdata/sample_av1.mp4"} {
+		dec, err := Open(path)
+		if err != nil {
+			t.Skipf("the loaded FFmpeg predates #78: %v", err)
+		}
+		missing := dec.VideoInfo().MissingDecoder
+		dec.Close()
+		if missing != "" {
+			t.Skipf("the loaded FFmpeg predates #78: no %s decoder", missing)
+		}
+		sw := hwDecodeAll(t, path, "0")
+		hw := hwDecodeAll(t, path, "force")
+		sameFrames(t, path+" GOFFMPEG_HWDECODE=force", hw, sw)
+		t.Logf("%s: software %q, hardware path %q", path, sw.decoder, hw.decoder)
+	}
+}

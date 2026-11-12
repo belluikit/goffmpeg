@@ -31,6 +31,24 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 		}
 	}
 	decoders, demuxers := builtComponents()
+	// The royalty-free formats (#78): Opus in Ogg in both sets; VP9, AV1
+	// (dav1d) and WebM in the media set, with the phones' hardware decoders.
+	// Expected only once the loaded FFmpeg has them, which goffmpeg-libs
+	// does from the release after v0.8.2: remove this condition when go.mod
+	// requires it.
+	if marker := map[string]string{"media": "libdav1d", "audio": "opus"}[testCodecSet]; slices.Contains(decoders, marker) {
+		wantDecoders = append(wantDecoders, "opus")
+		wantDemuxers = append(wantDemuxers, "ogg")
+		if testCodecSet == "media" {
+			wantDecoders = append(wantDecoders, "vp9", "libdav1d", "av1")
+			wantDemuxers = append(wantDemuxers, "matroska")
+			if runtime.GOOS == "android" {
+				wantDecoders = append(wantDecoders, "vp9_mediacodec", "av1_mediacodec")
+			}
+		}
+	} else {
+		t.Logf("the loaded FFmpeg predates #78 (no %s): not checking the royalty-free formats", marker)
+	}
 	// A demuxer's name can be a list of the formats it reads: configure's
 	// mov is "mov,mp4,m4a,3gp,3g2,mj2" at run time. Its first is the name.
 	for i, d := range demuxers {
