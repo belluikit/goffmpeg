@@ -138,6 +138,14 @@ static AVCodecContext *open_software_video(AVStream *st) {
 }
 
 #ifdef __ANDROID__
+// MEDIACODEC_MIN_PIXELS: MediaCodec is used only for frames larger than
+// 1280x720 (owner's decision, #65). Measured on the OPD2403 in a real player
+// (PR #70): at 1080p30 it took the device from about 110% of a core to 96%,
+// MediaCodec's own process included; at 720x720 from 71% to 77%, and it
+// dropped 6 frames in 1,188 where software dropped none. MediaCodec's process
+// costs about 11% of a core per stream whatever the size, so below 1080p
+// that cost is more than the software decoding it replaces.
+#define MEDIACODEC_MIN_PIXELS (1280 * 720)
 
 // FFmpeg asks for a Java VM on every MediaCodec open, to look the decoder up
 // by profile, and logs "No Java virtual machine has been registered" at error
@@ -231,7 +239,8 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
     AVCodecContext *ctx = NULL;
     if (st->codecpar->codec_id == AV_CODEC_ID_H264 && (mode == 2 || (mode == 1 && hw_suits(st->codecpar)))) {
 #ifdef __ANDROID__
-        ctx = open_mediacodec(d, st);
+        if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
+            ctx = open_mediacodec(d, st);
 #endif
 #ifdef __APPLE__
         ctx = open_videotoolbox(d, st);

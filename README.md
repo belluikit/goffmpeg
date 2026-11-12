@@ -172,11 +172,12 @@ headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
 
 ## Hardware decoding
 
-On Android and iOS, H.264 video decodes on the phone's hardware decoder by
-default: MediaCodec (`h264_mediacodec`) on Android, VideoToolbox on iOS. Only
-8-bit 4:2:0 streams in the Baseline, Main and High profiles go to it. Anything
-else (High 4:4:4, 10-bit, other codecs) decodes in software, and so does a
-stream the hardware decoder will not open. If MediaCodec opens a stream and
+On iOS, H.264 video decodes on VideoToolbox by default. On Android it decodes
+on MediaCodec (`h264_mediacodec`) when the video is larger than 1280×720, and
+in software at that size and below, where MediaCodec costs more than it saves
+(measured below). Only 8-bit 4:2:0 streams in the Baseline, Main and High
+profiles go to the hardware. Anything else (High 4:4:4, 10-bit, other codecs)
+decodes in software, and so does a stream the hardware decoder will not open. If MediaCodec opens a stream and
 then fails before its first frame, the software decoder takes over from the
 start, with no frame lost. Frames come out the same either way: `GetRGBA`
 converts them as before.
@@ -186,16 +187,20 @@ environment variable, read when each input is opened, controls this:
 
 | `GOFFMPEG_HWDECODE` | |
 |---|---|
-| unset | hardware on Android and iOS, software elsewhere |
+| unset | hardware on iOS, and on Android above 1280×720; software elsewhere |
 | `0` | software everywhere |
-| `1` | hardware where the bridge has it: Android, iOS, and macOS (VideoToolbox) |
-| `force` | as `1`, without the profile check (for tests) |
+| `1` | as unset, and also VideoToolbox on macOS |
+| `force` | the hardware wherever the bridge has it, without the profile and size checks (for tests) |
 
-Measured on an OPD2403 phone (Snapdragon 8 Gen 3, Android 16), playing
-1080p30 H.264 paced at 30 fps through `GetRGBA`: process CPU 80–82% of a core
-in software, 48–49% with MediaCodec, which costs about 13% more in the
-system's `media.hwcodec` process. At 720×720 it is 44% in software, and 30%
-plus that 13% with MediaCodec, so about the same in total (#65).
+Measured in bellui's video player (#65, PR #70), process CPU in one core's
+terms. On an OPD2403 phone (Snapdragon 8 Gen 3, Android 16), with MediaCodec's
+own `media.hwcodec` process counted in: 1080p30 about 110% in software and
+96% with MediaCodec; 720×720 about 71% in software and 77% with MediaCodec,
+which also dropped a few frames where software dropped none. Hence the size
+threshold. On an iPad (10th generation), VideoToolbox makes no measurable
+difference to the player's CPU at either size, with the same frames, byte for
+byte. On its own (no player), goffmpeg uses 10–17 points of a core less with
+it, which counts once frames go to the GPU as YUV.
 
 ## Backends
 

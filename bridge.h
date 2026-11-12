@@ -96,12 +96,14 @@ const char *decoder_missing(Decoder *d, int media);
 // the software decoder has replaced MediaCodec. NULL when no video stream is open. The name says
 // which path the last frame took, so read it after a frame.
 //
-// The phone's hardware decoder is used by default on Android (MediaCodec, for
-// 8-bit 4:2:0 H.264 in the Baseline, Main and High profiles) and on iOS
-// (VideoToolbox's H.264 hwaccel). Elsewhere the video decodes in software. The
-// environment variable GOFFMPEG_HWDECODE, read at each open, changes that: "0"
-// decodes in software everywhere, "1" also tries the hardware on macOS, and
-// "force" skips the profile check (for tests). The software decoder takes over
+// The phone's hardware decoder is used by default for 8-bit 4:2:0 H.264 in
+// the Baseline, Main and High profiles: on iOS VideoToolbox's H.264 hwaccel,
+// and on Android MediaCodec, only for frames larger than 1280x720, below which
+// it costs more than it saves (MEDIACODEC_MIN_PIXELS in bridge.c). Elsewhere
+// the video decodes in software. The environment variable GOFFMPEG_HWDECODE,
+// read at each open, changes that: "0" decodes in software everywhere, "1"
+// also tries the hardware on macOS, and "force" skips the profile and size
+// checks (for tests). The software decoder takes over
 // when the hardware decoder will not open, and when MediaCodec fails before
 // its first frame, which it does for streams it opened but cannot decode.
 const char *decoder_video_decoder(Decoder *d);

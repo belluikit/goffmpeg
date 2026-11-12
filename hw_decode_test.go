@@ -160,8 +160,10 @@ func TestHardwareDecodeMatchesSoftware(t *testing.T) {
 	if sw.decoder != "h264" {
 		t.Fatalf("GOFFMPEG_HWDECODE=0 decoded with %q, want h264", sw.decoder)
 	}
-	hw := hwDecodeAll(t, "testdata/sample.mp4", "1")
-	sameFrames(t, "GOFFMPEG_HWDECODE=1", hw, sw)
+	// force: on Android sample.mp4 (320x240) is below MediaCodec's size
+	// threshold, and this test is about the hardware path's frames.
+	hw := hwDecodeAll(t, "testdata/sample.mp4", "force")
+	sameFrames(t, "GOFFMPEG_HWDECODE=force", hw, sw)
 	requireHardware(t, hw)
 }
 
@@ -238,7 +240,7 @@ func TestHardwareDecodeSeek(t *testing.T) {
 		return rgba, dec.Position(), dec.(interface{ videoDecoder() string }).videoDecoder()
 	}
 	swImg, swPos, _ := after("0")
-	hwImg, hwPos, name := after("1")
+	hwImg, hwPos, name := after("force") // as in TestHardwareDecodeMatchesSoftware
 	p := checkFrame(t, "first frame after Seek(2)", hwImg.Pix, swImg.Pix)
 	t.Logf("after Seek(2): software at %.3f s, %q at %.3f s, %.1f dB", swPos, name, hwPos, p)
 	if hwPos != swPos {
@@ -308,7 +310,7 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 		"testdata/yuv/smpte170m_pc_320.mp4",
 	} {
 		sw := hwPlanes(t, path, "0")
-		hw := hwPlanes(t, path, "1")
+		hw := hwPlanes(t, path, "force") // as in TestHardwareDecodeMatchesSoftware
 		t.Logf("%s: %d frames, hardware run decoded by %q", path, len(hw.frames), hw.decoder)
 		if len(hw.frames) != len(sw.frames) {
 			t.Errorf("%s: %d frames with the hardware, %d in software", path, len(hw.frames), len(sw.frames))
@@ -325,6 +327,40 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 		t.Logf("%s: worst PSNR of the planes against software %.1f dB (VM: %v)", path, worst, onVM())
 		if path == "testdata/sample.mp4" {
 			requireHardware(t, decoded{decoder: hw.decoder, last: hw.decoder})
+		}
+	}
+}
+
+// On Android, MediaCodec decodes only video larger than 1280x720 (#65): below
+// that, it costs more than the software decoding it replaces. VideoToolbox has
+// no threshold. Unset GOFFMPEG_HWDECODE is the default; "1" applies the same
+// rules, so it is checked too.
+func TestHardwareDecodeSizeThreshold(t *testing.T) {
+	if runtime.GOOS != "android" && runtime.GOOS != "ios" && !(runtime.GOOS == "darwin" && !onVM()) {
+		t.Skip("no default hardware path to check on " + runtime.GOOS)
+	}
+	for _, c := range []struct {
+		path  string
+		large bool
+	}{
+		{"testdata/sample.mp4", false},     // 320x240
+		{"testdata/sample_1080.mp4", true}, // 1920x1080
+	} {
+		modes := []string{"1"}
+		if runtime.GOOS != "darwin" {
+			modes = append(modes, "") // unset: the default, which is software on macOS
+		}
+		for _, mode := range modes {
+			// The bridge reads an empty GOFFMPEG_HWDECODE as unset.
+			got := hwDecodeAll(t, c.path, mode)
+			want := hwName()
+			if runtime.GOOS == "android" && !c.large {
+				want = "h264"
+			}
+			t.Logf("%s, GOFFMPEG_HWDECODE=%q: %d frames from %q", c.path, mode, len(got.frames), got.decoder)
+			if got.decoder != want || got.last != want {
+				t.Errorf("%s, GOFFMPEG_HWDECODE=%q: decoded with %q to %q, want %q", c.path, mode, got.decoder, got.last, want)
+			}
 		}
 	}
 }
