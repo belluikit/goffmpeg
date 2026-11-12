@@ -149,9 +149,6 @@ func TestNoVideoLinksTheAudioSet(t *testing.T) {
 // The audio set plays Opus in Ogg too (#78), beside MP3 and WAV.
 func TestAudioSetPlaysOpus(t *testing.T) {
 	dec, err := Open("testdata/sample.opus")
-	if errors.Is(err, ErrUnrecognizedInput) || errors.Is(err, ErrNoDecoder) {
-		t.Skipf("the loaded FFmpeg predates #78: %v", err)
-	}
 	if err != nil {
 		t.Fatal(err)
 	}

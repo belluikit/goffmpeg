@@ -381,17 +381,6 @@ func TestHardwareDecodeRoyaltyFree(t *testing.T) {
 		t.Skip("no hardware decoder in the bridge on " + runtime.GOOS)
 	}
 	for _, path := range []string{"testdata/sample_vp9.webm", "testdata/sample_av1.mp4"} {
-		dec, err := Open(path)
-		if err != nil {
-			t.Skipf("the loaded FFmpeg predates #78: %v", err)
-		}
-		missing := dec.VideoInfo().MissingDecoder
-		dec.Close()
-		if missing != "" {
-			t.Skipf("the loaded FFmpeg predates #78: no %s decoder", missing)
-		}
-		t.Setenv("GOFFMPEG_HWDECODE", "0")
-		skipWithoutDav1d(t, path)
 		sw := hwDecodeAll(t, path, "0")
 		hw := hwDecodeAll(t, path, "force")
 		sameFrames(t, path+" GOFFMPEG_HWDECODE=force", hw, sw)
