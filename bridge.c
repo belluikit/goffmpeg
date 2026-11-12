@@ -12,6 +12,9 @@
 #ifdef __ANDROID__
 #include <pthread.h>
 #include <stdarg.h>
+#include <dlfcn.h>
+#include <jni.h>
+#include <libavcodec/jni.h>
 #endif
 
 // find_video_stream is av_find_best_stream for video, minus attached pictures.
@@ -162,8 +165,30 @@ static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
 static void mediacodec_log_install(void) { av_log_set_callback(mediacodec_log); }
 static pthread_once_t mediacodec_log_once = PTHREAD_ONCE_INIT;
 
+// mediacodec_find_java_vm hands FFmpeg the app's Java VM, when the process has
+// one and nothing has set it yet (#69). FFmpeg looks up a MediaCodec decoder
+// for the stream's profile and level through Java, and without a VM it falls
+// back to any decoder of the type, through the NDK. JNI_GetCreatedJavaVMs is
+// public NDK API from Android 12 (API 31), in libnativehelper. It is looked up
+// at run time, so the library still loads on older Android, where this does
+// nothing. A process with no VM, a test binary, finds none and is unchanged.
+static void mediacodec_find_java_vm(void) {
+    if (av_jni_get_java_vm(NULL)) return;
+    void *lib = dlopen("libnativehelper.so", RTLD_NOW);
+    if (!lib) return;
+    jint (*created)(JavaVM **, jsize, jsize *) =
+        (jint (*)(JavaVM **, jsize, jsize *))dlsym(lib, "JNI_GetCreatedJavaVMs");
+    JavaVM *vm = NULL;
+    jsize n = 0;
+    if (created && created(&vm, 1, &n) == JNI_OK && n > 0 && vm)
+        av_jni_set_java_vm(vm, NULL);
+    // libnativehelper stays loaded: FFmpeg keeps using the VM it returned.
+}
+static pthread_once_t mediacodec_vm_once = PTHREAD_ONCE_INIT;
+
 static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
+    pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
     const AVCodec *codec = avcodec_find_decoder_by_name("h264_mediacodec");
     if (!codec) return NULL;
     struct DecoderHW *hw = av_mallocz(sizeof(*hw));
@@ -173,7 +198,14 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
         return NULL;
     }
     avcodec_parameters_to_context(ctx, st->codecpar);
-    if (avcodec_open2(ctx, codec, NULL) < 0) {
+    // With a VM, FFmpeg would otherwise switch to MediaCodec's Java API
+    // (mediacodecdec.c: ndk_codec defaults to "no VM"). The NDK API is the one
+    // measured on the OPD2403 (#65); the VM is only for the lookup.
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "ndk_codec", "1", 0);
+    int opened = avcodec_open2(ctx, codec, &opts);
+    av_dict_free(&opts);
+    if (opened < 0) {
         avcodec_free_context(&ctx);
         av_free(hw);
         return NULL;
