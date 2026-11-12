@@ -4,7 +4,9 @@ package goffmpeg
 
 import (
 	"image"
+	"math"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -75,37 +77,66 @@ func hwDecodeAll(t *testing.T, path, mode string) decoded {
 	return out
 }
 
-// meanDiff is the mean absolute difference of two images' bytes.
-func meanDiff(a, b *image.RGBA) float64 {
-	var sum int
-	for i := range a.Pix {
-		d := int(a.Pix[i]) - int(b.Pix[i])
-		if d < 0 {
-			d = -d
-		}
-		sum += d
+// psnr is the peak signal-to-noise ratio of b against a, in dB; +Inf when
+// they are equal.
+func psnr(a, b []byte) float64 {
+	var se float64
+	for i := range a {
+		d := float64(a[i]) - float64(b[i])
+		se += d * d
 	}
-	return float64(sum) / float64(len(a.Pix))
+	if se == 0 {
+		return math.Inf(1)
+	}
+	return 10 * math.Log10(255*255/(se/float64(len(a))))
+}
+
+// onVM reports a macOS virtual machine, such as a GitHub runner.
+func onVM() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	out, err := exec.Command("sysctl", "-n", "kern.hv_vmm_present").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "1"
+}
+
+// minVMPSNR is how close a frame must be to software's on a VM. A conforming
+// H.264 decoder is bit-exact, and the hardware decoders measured were:
+// VideoToolbox on an M-series Mac, MediaCodec on the OPD2403. VideoToolbox in
+// GitHub's macOS VM is not; its frames differed by 1.68 per byte on average
+// (run 43169957531). Measured on sample.mp4, the failures these tests are for
+// score far lower: Cb and Cr swapped 13.0 dB, the previous frame shown again
+// 25.9 dB.
+const minVMPSNR = 32
+
+// checkFrame fails unless got is want, or on a VM within minVMPSNR of it. It
+// returns the PSNR.
+func checkFrame(t *testing.T, what string, got, want []byte) float64 {
+	t.Helper()
+	p := psnr(got, want)
+	switch {
+	case len(got) != len(want):
+		t.Errorf("%s: %d bytes, software %d", what, len(got), len(want))
+	case onVM() && p < minVMPSNR:
+		t.Errorf("%s: %.1f dB from software's, want at least %d dB on a VM", what, p, minVMPSNR)
+	case !onVM() && !math.IsInf(p, 1):
+		t.Errorf("%s: differs from software's (%.1f dB), want the same bytes", what, p)
+	}
+	return p
 }
 
 // sameFrames fails unless got has as many frames as want and each is the
-// same picture. H.264 decoding is exact, so a hardware decoder gives the same
-// samples; the conversion from nv12 rather than yuv420p may round apart.
+// same picture (checkFrame).
 func sameFrames(t *testing.T, what string, got, want decoded) {
 	t.Helper()
 	if len(got.frames) != len(want.frames) {
 		t.Fatalf("%s: %d video frames, software %d", what, len(got.frames), len(want.frames))
 	}
-	worst := 0.0
+	worst := math.Inf(1)
 	for i := range got.frames {
-		if d := meanDiff(got.frames[i], want.frames[i]); d > worst {
-			worst = d
-		}
+		worst = math.Min(worst, checkFrame(t, what, got.frames[i].Pix, want.frames[i].Pix))
 	}
-	t.Logf("%s: %d frames from %q (last %q); worst mean difference from software %.3f", what, len(got.frames), got.decoder, got.last, worst)
-	if worst > 1 {
-		t.Errorf("%s: a frame differs from software's by %.3f per byte on average, want at most 1", what, worst)
-	}
+	t.Logf("%s: %d frames from %q (last %q); worst PSNR against software %.1f dB (VM: %v)", what, len(got.frames), got.decoder, got.last, worst, onVM())
 }
 
 // requireHardware fails unless the hardware decoded the frames. A CI runner
@@ -212,12 +243,10 @@ func TestHardwareDecodeSeek(t *testing.T) {
 	}
 	swImg, swPos, _ := after("0")
 	hwImg, hwPos, name := after("1")
-	t.Logf("after Seek(2): software at %.3f s, %q at %.3f s, difference %.3f", swPos, name, hwPos, meanDiff(hwImg, swImg))
+	p := checkFrame(t, "first frame after Seek(2)", hwImg.Pix, swImg.Pix)
+	t.Logf("after Seek(2): software at %.3f s, %q at %.3f s, %.1f dB", swPos, name, hwPos, p)
 	if hwPos != swPos {
 		t.Errorf("position after Seek(2): %.3f with the hardware, %.3f in software", hwPos, swPos)
-	}
-	if d := meanDiff(hwImg, swImg); d > 1 {
-		t.Errorf("first frame after Seek(2) differs from software's by %.3f per byte on average", d)
 	}
 	if strings.TrimSpace(name) == "" {
 		t.Error("no decoder name after the seek")
@@ -289,16 +318,15 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 			t.Errorf("%s: %d frames with the hardware, %d in software", path, len(hw.frames), len(sw.frames))
 			continue
 		}
+		worst := math.Inf(1)
 		for i := range sw.frames {
-			if string(hw.frames[i]) != string(sw.frames[i]) {
-				t.Errorf("%s: frame %d: planes differ from software's", path, i)
-				break
-			}
+			worst = math.Min(worst, checkFrame(t, path+": planes", hw.frames[i], sw.frames[i]))
 			if hw.infos[i] != sw.infos[i] {
 				t.Errorf("%s: frame %d: %+v with the hardware, %+v in software", path, i, hw.infos[i], sw.infos[i])
 				break
 			}
 		}
+		t.Logf("%s: worst PSNR of the planes against software %.1f dB (VM: %v)", path, worst, onVM())
 		if path == "testdata/sample.mp4" {
 			requireHardware(t, decoded{decoder: hw.decoder, last: hw.decoder})
 		}
