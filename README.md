@@ -180,7 +180,12 @@ video is larger than 1280×720, and in software at that size and below, where
 MediaCodec costs more than it saves (measured below). Only 8-bit 4:2:0 streams
 go to the hardware: H.264 Baseline, Main and High, VP9 profile 0, AV1 Main.
 Anything else (High 4:4:4, 10-bit, other codecs)
-decodes in software, and so does a stream the hardware decoder will not open. If MediaCodec opens a stream and
+decodes in software, and so does a stream the hardware decoder will not open.
+So does a stream the device has no hardware decoder for, such as AV1 on most
+phones without a flagship chip: Android would otherwise decode it with its own
+software decoder in its media process, which costs more than goffmpeg's (#85).
+That check needs the app's Java VM, so Android 12 or later; a process with no
+Java VM uses whatever decoder Android offers, as before. If MediaCodec opens a stream and
 then fails before its first frame, the software decoder takes over from the
 start, with no frame lost. Frames come out the same either way: `GetRGBA`
 converts them as before.

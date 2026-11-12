@@ -151,5 +151,19 @@ linux_*)
 	;;
 esac
 
+# Android's media set: the bridge tells that a device has no hardware decoder
+# for a stream from FFmpeg's log line when MediaCodec's lookup finds none
+# (bridge.c, open_mediacodec, #85). An FFmpeg that words it differently would
+# quietly bring back Android's software decoders in its media process; this
+# fails the build instead.
+case $target in
+android_*)
+	if [ "${SET:-media}" = media ]; then
+		LC_ALL=C grep -aqF 'Failed to getCodecNameByType(' "$dir/libavcodec-goffmpeg.so" ||
+			err "libavcodec has no \"Failed to getCodecNameByType(\" log line, which bridge.c's open_mediacodec watches for (#85)"
+	fi
+	;;
+esac
+
 [ "$fail" -eq 0 ] || exit 1
 echo "==> $target: $checked shared libraries check out"

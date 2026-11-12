@@ -175,8 +175,17 @@ static AVCodecContext *open_software_video(AVStream *st) {
 // for every video an app opens. This demotes that one message to verbose; the
 // callback is installed once, the first time MediaCodec is opened, and passes
 // everything else to FFmpeg's own.
+//
+// It also watches the open for the lookup's failure (#85). mediacodec_opening
+// is the context open_mediacodec is opening on this thread; FFmpeg logs the
+// failure against that context, from inside avcodec_open2, so on the same
+// thread.
+static __thread const void *mediacodec_opening;
+static __thread int mediacodec_no_lookup;
 static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
     if (fmt && strcmp(fmt, "No Java virtual machine has been registered\n") == 0) level = AV_LOG_VERBOSE;
+    if (avcl && avcl == mediacodec_opening && fmt && strncmp(fmt, "Failed to getCodecNameByType(", 29) == 0)
+        mediacodec_no_lookup = 1;
     av_log_default_callback(avcl, level, fmt, vl);
 }
 static void mediacodec_log_install(void) { av_log_set_callback(mediacodec_log); }
@@ -222,8 +231,26 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     // measured on the OPD2403 (#65); the VM is only for the lookup.
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "ndk_codec", "1", 0);
+    mediacodec_opening = ctx;
+    mediacodec_no_lookup = 0;
     int opened = avcodec_open2(ctx, codec, &opts);
+    mediacodec_opening = NULL;
     av_dict_free(&opts);
+    // With a Java VM, FFmpeg asks Android's codec list for a decoder of the
+    // type and profile that is not software-only. When it finds none, it
+    // still creates one by type through the NDK, because ndk_codec is set
+    // (mediacodecdec_common.c, ff_mediacodec_dec_init), and Android hands it
+    // a software decoder in its media process: for AV1 on a phone without
+    // AV1 hardware, c2.android.av1-dav1d, which cost the moto g power 2024
+    // 182-189% of a core at 1080p30 against 140-156% for goffmpeg's own dav1d
+    // (#85). So a failed lookup with a VM means "no hardware": refuse, and
+    // the caller opens the software decoder. Without a VM (a process with no
+    // Java, Android before 12) there is no lookup to fail, and the NDK's
+    // choice stands, as before.
+    if (opened >= 0 && mediacodec_no_lookup && av_jni_get_java_vm(NULL)) {
+        av_log(ctx, AV_LOG_VERBOSE, "goffmpeg: no hardware %s decoder; decoding in software\n", avcodec_get_name(id));
+        opened = AVERROR(ENOSYS);
+    }
     if (opened < 0) {
         avcodec_free_context(&ctx);
         av_free(hw);
