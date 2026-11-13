@@ -1,0 +1,79 @@
+avcodec/mediacodecdec: give up on a MediaCodec that stalls before its first frame
+
+goffmpeg #88. Upstream: not submitted yet.
+
+Before the first output frame, mediacodec_receive_frame polls for an input
+buffer and an output frame with no timeout on either, and loops until one of
+them gives something. A MediaCodec that holds every input buffer and returns
+nothing keeps the caller in that loop forever, one core busy, and the call
+never returns.
+
+Measured on a Pixel 9a (Android 17) in a native process with no binder thread
+pool (goffmpeg #86): c2.exynos.h264.decoder took two packets, then 14,782 polls
+in a 5-second run returned nothing. A working MediaCodec gave its first frame
+22-166 ms after the open on the Pixel 9a, a moto g power 2024 and a OnePlus
+Pad 2 (H.264 up to 1080p, VP9, AV1).
+
+With this, after 2 s of such a stall before the first frame, receive_frame
+returns AVERROR_EXTERNAL, which goffmpeg's bridge turns into a fallback to
+software decoding with the packets MediaCodec was sent.
+
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index f900950417..234da5a487 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -32,6 +32,7 @@
+ #include "libavutil/intreadwrite.h"
+ #include "libavutil/pixfmt.h"
+ #include "libavutil/internal.h"
++#include "libavutil/time.h"
+ 
+ #include "avcodec.h"
+ #include "codec_internal.h"
+@@ -486,11 +487,16 @@ done:
+     return ret;
+ }
+ 
++/* How long MediaCodec may go without offering an input buffer or returning
++ * a frame, before its first frame, before receive_frame gives up. */
++#define STALL_BEFORE_FIRST_FRAME_US 2000000
++
+ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+ {
+     MediaCodecContext *s = avctx->priv_data;
+     int ret;
+     ssize_t index;
++    int64_t stall_start = 0;
+ 
+     /* In delay_flush mode, wait until the user has released or rendered
+        all retained frames. */
+@@ -519,11 +525,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+                  * return EAGAIN, which violate the design.
+                  */
+                 if (ff_AMediaCodec_infoTryAgainLater(s->ctx->codec, index) &&
+-                    ret == AVERROR(EAGAIN))
++                    ret == AVERROR(EAGAIN)) {
++                    /* Before the first frame both dequeues have no timeout,
++                     * so a codec that holds every input buffer and returns
++                     * nothing would keep this loop spinning forever. Give up
++                     * after a while instead, so the caller can fall back. */
++                    if (s->ctx->output_buffer_count == 0) {
++                        int64_t now = av_gettime_relative();
++                        if (!stall_start) {
++                            stall_start = now;
++                        } else if (now - stall_start > STALL_BEFORE_FIRST_FRAME_US) {
++                            av_log(avctx, AV_LOG_WARNING,
++                                   "MediaCodec took no input and returned no frame for %d ms before its first frame\n",
++                                   STALL_BEFORE_FIRST_FRAME_US / 1000);
++                            return AVERROR_EXTERNAL;
++                        }
++                    }
+                     continue;
++                }
+                 return ret;
+             }
+             s->ctx->current_input_buffer = index;
++            stall_start = 0;
+         }
+ 
+         /* try to flush any buffered packet data */
