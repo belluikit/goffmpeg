@@ -32,14 +32,19 @@ func onVM() bool {
 // environment has it from the start, under either backend.
 const hwChildEnv = "GOFFMPEG_HW_CHILD"
 
-// TestHardwareDecodeChild is the child: it decodes sample.mp4 through
+// TestHardwareDecodeChild is the child: it decodes sample_video.mp4 through
 // GetYCbCr and prints one line, the decoder of the last frame, the frame count
-// and a hash of every frame's planes.
+// and a hash of every frame's planes. sample_video.mp4 is sample.mp4's video
+// stream, copied without its AAC audio (ffmpeg -map 0:v -c copy), so the
+// child's decode is the video's alone. On Android AAC decodes on MediaCodec
+// too (#77), and TestHardwareDecodeStall's child runs with no binder pool,
+// where a Pixel 9a's AAC decoder stalls as its video decoder does, and with
+// the audio Open did not return in 60 s.
 func TestHardwareDecodeChild(t *testing.T) {
 	if os.Getenv(hwChildEnv) == "" {
 		t.Skip("run by TestHardwareDecodeInChild")
 	}
-	dec, err := Open("testdata/sample.mp4")
+	dec, err := Open("testdata/sample_video.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
