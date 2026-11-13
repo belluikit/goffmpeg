@@ -1,0 +1,83 @@
+avcodec/mediacodecdec: give audio decoders a frame size
+
+goffmpeg #77. Upstream: not submitted yet.
+
+The audio decoders never set frame_size, which libavformat needs to time
+packets that carry no timestamps of their own. Raw ADTS is one: with
+aac_mediacodec as the only AAC decoder, avformat_find_stream_info left
+frame_size at 0, every packet had no pts or dts and a duration of 0,
+every frame came out at 0, and seeking failed, with no index to seek
+by. Measured on a OnePlus Pad 2 (Android 16) with AAC-LC in ADTS:
+Position 0 for every frame and av_seek_frame -1, where the aac decoder
+gives frame_size 1024 and packets 1024 samples apart.
+
+frame_size is now the sample count of the first frame MediaCodec
+returns: 1024 for AAC-LC, 2048 for HE-AAC. For stream probing to see it,
+it has to decode that frame, and it stopped as soon as it had a sample
+format, which came with MediaCodec's output format, before the first
+frame on some devices: a Pixel 9a (Android 17) then timed ADTS right and
+the OnePlus Pad 2 did not. The sample format now reaches the codec
+context with the first frame, so probing decodes one.
+
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 1c8dee0897..0e9c0404d1 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -379,7 +379,13 @@ static int mediacodec_wrap_sw_audio_buffer(AVCodecContext *avctx,
+ {
+     int ret = 0;
+     int status = 0;
+-    const int sample_size = av_get_bytes_per_sample(avctx->sample_fmt);
++    int sample_size;
++
++    /* The sample format is the last of the parameters avformat_find_stream_info
++     * waits for, so giving it here makes stream probing decode a whole frame,
++     * and see frame_size below, rather than stop at the output format. */
++    avctx->sample_fmt = s->sample_fmt;
++    sample_size = av_get_bytes_per_sample(avctx->sample_fmt);
+     if (!sample_size) {
+         av_log(avctx, AV_LOG_ERROR, "Could not get bytes per sample\n");
+         ret = AVERROR(ENOSYS);
+@@ -395,6 +401,11 @@ static int mediacodec_wrap_sw_audio_buffer(AVCodecContext *avctx,
+     frame->format = avctx->sample_fmt;
+     frame->sample_rate = avctx->sample_rate;
+     frame->nb_samples = info->size / (sample_size * avctx->ch_layout.nb_channels);
++    /* The samples in a frame, which libavformat needs to time packets that
++     * carry no timestamps of their own, such as raw ADTS. The first frame is
++     * a whole one: padding is trimmed after this. */
++    if (!avctx->frame_size)
++        avctx->frame_size = frame->nb_samples;
+ 
+     ret = av_channel_layout_copy(&frame->ch_layout, &avctx->ch_layout);
+     if (ret < 0) {
+@@ -705,11 +716,13 @@ static int mediacodec_dec_parse_audio_format(AVCodecContext *avctx, MediaCodecDe
+     AMEDIAFORMAT_GET_INT32(channel_count, "channel-count", 1);
+     AMEDIAFORMAT_GET_INT32(sample_rate,   "sample-rate",   1);
+ 
++    /* The sample format reaches avctx with the first frame (see
++     * mediacodec_wrap_sw_audio_buffer). */
+     AMEDIAFORMAT_GET_INT32(pcm_encoding, "pcm-encoding", 0);
+     if (pcm_encoding)
+-        avctx->sample_fmt  = mcdec_map_pcm_format(avctx, s, pcm_encoding);
++        s->sample_fmt = mcdec_map_pcm_format(avctx, s, pcm_encoding);
+     else
+-        avctx->sample_fmt = AV_SAMPLE_FMT_S16;
++        s->sample_fmt = AV_SAMPLE_FMT_S16;
+ 
+     avctx->sample_rate = sample_rate;
+ 
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index 4a9111aa3b..da32e30447 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -80,6 +80,10 @@ typedef struct MediaCodecDecContext {
+         uint8_t data[10];
+     } skip[8];
+     int nb_skip;
++
++    /* Audio: the sample format of MediaCodec's output, given to the codec
++     * context with the first frame rather than with the output format. */
++    enum AVSampleFormat sample_fmt;
+ } MediaCodecDecContext;
+ 
+ int ff_mediacodec_dec_init(AVCodecContext *avctx,

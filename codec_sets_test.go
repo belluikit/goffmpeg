@@ -19,7 +19,11 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	wantDecoders := []string{"mp3float", "pcm_f32le", "pcm_f64le", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_u8"}
 	wantDemuxers := []string{"mp3", "wav"}
 	if testCodecSet == "media" {
-		wantDecoders = append(wantDecoders, "aac", "h264")
+		wantDecoders = append(wantDecoders, "h264")
+		if runtime.GOOS != "android" {
+			// Android decodes AAC with its own decoder (#77), below.
+			wantDecoders = append(wantDecoders, "aac")
+		}
 		// mov for MP4; hls and mpegts for HLS, with what hls selects.
 		wantDemuxers = append(wantDemuxers, "mov", "hls", "mpegts", "aac", "ac3", "eac3")
 		switch runtime.GOOS {
@@ -40,7 +44,7 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 		wantDecoders = append(wantDecoders, "vp9", "libdav1d", "av1")
 		wantDemuxers = append(wantDemuxers, "matroska")
 		if runtime.GOOS == "android" {
-			wantDecoders = append(wantDecoders, "vp9_mediacodec", "av1_mediacodec")
+			wantDecoders = append(wantDecoders, "vp9_mediacodec", "av1_mediacodec", "aac_mediacodec")
 		}
 	}
 	// A demuxer's name can be a list of the formats it reads: configure's

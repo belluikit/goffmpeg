@@ -194,7 +194,8 @@ SET_HWACCELS =
 SET_INDEVS   =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
-	SET_DECODERS += h264 aac
+	# Android decodes AAC with its own decoder, aac_mediacodec, below (#77).
+	SET_DECODERS += h264 $(if $(filter android_%,$(TARGET)),,aac)
 	SET_PARSERS  += h264 aac
 	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
 	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3
@@ -239,9 +240,11 @@ endif
 # set already has. FFmpeg registers it after the software h264, so a lookup by
 # codec ID still returns h264; a caller that wants the phone's decoder opens it
 # by name.
-# The same for VP9 and AV1 (#78).
+# The same for VP9 and AV1 (#78), and for AAC (#77): Android's own AAC
+# decoder, so the phones need no FFmpeg AAC decoder. It selects the
+# aac_adtstoasc filter and the aac parser.
 ifeq ($(SET)$(filter android_%,$(TARGET)),media$(TARGET))
-	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec
+	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec aac_mediacodec
 endif
 
 # The desktop media set has every codec (owner, #41): the lists above are
@@ -384,11 +387,16 @@ dav1d:
 # the header of each file says what it fixes and where it went upstream.
 PATCH_DIR := $(ROOT)/patches
 
-# Idempotent: dist-all configures seven targets from one source tree, so this
-# runs repeatedly against an already-patched checkout. A patch that reverses
-# cleanly is one that is already applied, which is the check used here — it
-# distinguishes "done" from "does not fit this revision", and only the latter
-# is an error.
+# Idempotent: dist-all configures seven targets from one source tree, and CI
+# builds two codec sets from one, so this runs repeatedly against an
+# already-patched checkout. Applying the set writes a stamp in the source tree,
+# a checksum of the patches, and a run that finds the same stamp, with the last
+# patch in place (a tree reset by git keeps the untracked stamp), is done. A tree
+# with no stamp is checked patch by patch: one that reverses cleanly is already
+# applied. That check alone is not enough once two patches touch neighbouring
+# lines (patches/0002 and 0003, #77): with both applied, the first no longer
+# reverses on its own. Either way it distinguishes "done" from "does not fit
+# this revision", and only the latter is an error.
 patch-src: check-src
 	@set -e; \
 	ls $(PATCH_DIR)/*.patch >/dev/null 2>&1 || exit 0; \
@@ -396,6 +404,14 @@ patch-src: check-src
 		echo "ERROR: patch(1) not found, and $(PATCH_DIR) is not empty."; \
 		echo "       Install it (Debian: apt-get install patch) and rebuild."; \
 		exit 1; }; \
+	stamp="$(FFMPEG_SRC)/.goffmpeg-patches"; \
+	sum=$$(cat $(PATCH_DIR)/*.patch | cksum); \
+	last=$$(ls $(PATCH_DIR)/*.patch | tail -n 1); \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sum" ] && \
+		patch -p1 -R -f -s --dry-run -d "$(FFMPEG_SRC)" < "$$last" >/dev/null 2>&1; then \
+		echo "    already applied: $$(cd $(PATCH_DIR) && echo *.patch)"; \
+		exit 0; \
+	fi; \
 	for p in $(PATCH_DIR)/*.patch; do \
 		test -e "$$p" || continue; \
 		name=$$(basename "$$p"); \
@@ -408,7 +424,8 @@ patch-src: check-src
 			echo "       FFmpeg has moved under it — rebase the patch or drop it if fixed upstream."; \
 			exit 1; \
 		fi; \
-	done
+	done; \
+	echo "$$sum" > "$$stamp"
 
 print-config: check-src
 	@echo "TARGET      = $(TARGET)"

@@ -196,13 +196,28 @@ such as a test binary, a command-line tool or a daemon, goffmpeg starts one
 (`ABinderProcess_startThreadPool`) the first time it opens MediaCodec. Without
 it, on a Pixel 9a (Android 17) the decode never returned (#86).
 
+On Android, AAC decodes with Android's own decoder, through FFmpeg's
+`aac_mediacodec`, and the Android builds carry no FFmpeg AAC decoder (#77):
+the platform's decoder comes with Google's licence for the format. It is a
+software decoder in Android's media process (`c2.android.aac.decoder` on the
+phones measured), so it is used at every size and `GOFFMPEG_HWDECODE` does not
+change it. AAC-LC, HE-AAC and HE-AACv2 from MP4, ADTS and HLS come out at the
+rate, channel count and length FFmpeg's own decoder gives them; on a OnePlus
+Pad 2 and a Pixel 9a, AAC-LC was within 72–79 dB of it, and HE-AAC kept its
+high band and HE-AACv2 its stereo. Opening an input with AAC costs more:
+84–155 ms on the OnePlus and 76–215 ms on the Pixel, against 1–24 ms with
+FFmpeg's decoder, because
+FFmpeg's stream probing opens one MediaCodec decoder to learn the stream's
+real format and playback opens a second. Three FFmpeg patches make it work
+(`patches/0002`–`0004`, see BUILDING.md).
+
 On desktop, video decodes in software unless you ask. The `GOFFMPEG_HWDECODE`
 environment variable, read when each input is opened, controls this:
 
 | `GOFFMPEG_HWDECODE` | |
 |---|---|
 | unset | hardware on iOS, and on Android above 1280×720; software elsewhere |
-| `0` | software everywhere |
+| `0` | software video everywhere (AAC on Android still decodes on Android's decoder) |
 | `1` | as unset, and also VideoToolbox on macOS |
 | `force` | the hardware wherever the bridge has it, without the profile and size checks (for tests) |
 
@@ -243,7 +258,7 @@ goffmpeg's FFmpeg comes in two codec sets (#41):
 | Set | Plays | Linked by |
 |---|---|---|
 | **media**, desktop (macOS, Linux, Windows) | every format FFmpeg decodes; webcam capture | default |
-| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`), WebM, Ogg and HLS, with H.264, VP9 and AV1 video and AAC and Opus audio | default |
+| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`), WebM, Ogg and HLS, with H.264, VP9 and AV1 video and AAC and Opus audio (AAC on Android through Android's decoder) | default |
 | **audio**, every platform | MP3, WAV and Opus (Ogg, `.opus`) | `-tags goffmpeg_novideo` |
 
 VP9, AV1 and Opus are there for apps that move their content to royalty-free

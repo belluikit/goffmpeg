@@ -165,6 +165,10 @@ android_*)
 		# (#88). Its log line is the mark that the patch is in the build.
 		LC_ALL=C grep -aqF 'MediaCodec took no input and returned no frame for' "$dir/libavcodec-goffmpeg.so" ||
 			err "libavcodec lacks patches/0001-mediacodecdec-stall-before-first-frame.patch (#88): its log line is missing"
+		# Android decodes AAC with aac_mediacodec (#77), which needs
+		# patches/0002 to decode ADTS and HLS at all.
+		LC_ALL=C grep -aqF 'Queued codec config' "$dir/libavcodec-goffmpeg.so" ||
+			err "libavcodec lacks patches/0002-mediacodecdec-aac-from-adts.patch (#77): its log line is missing"
 	fi
 	;;
 esac
