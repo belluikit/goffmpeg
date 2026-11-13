@@ -43,7 +43,10 @@ make sync-libs TARGET=linux_amd64       # copy both into ../goffmpeg-libs, write
 
 The media set builds dav1d first (`make dav1d`, `scripts/build-dav1d.sh`), with
 meson and ninja, and links it into libavcodec statically (#78). dav1d is
-BSD-2-Clause; the build fails if it comes out without its assembly.
+BSD-2-Clause; the build fails if it comes out without its assembly. When
+code.videolan.org is down, VideoLAN's GitHub mirror
+(`https://github.com/videolan/dav1d.git`) has the same tags. CI falls back to
+it and checks the commit either way (#92).
 
 `make dist` alone builds the host target; `make dist-all` builds everything this
 machine can produce without a container. `make sync-headers` refreshes the
