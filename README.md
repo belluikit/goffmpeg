@@ -190,6 +190,12 @@ then fails before its first frame, the software decoder takes over from the
 start, with no frame lost. Frames come out the same either way: `GetRGBA`
 converts them as before.
 
+MediaCodec hands its frames back over binder, which needs a binder thread
+pool in your process. An app always has one. In a process with no Java VM,
+such as a test binary, a command-line tool or a daemon, goffmpeg starts one
+(`ABinderProcess_startThreadPool`) the first time it opens MediaCodec. Without
+it, on a Pixel 9a (Android 17) the decode never returned (#86).
+
 On desktop, video decodes in software unless you ask. The `GOFFMPEG_HWDECODE`
 environment variable, read when each input is opened, controls this:
 

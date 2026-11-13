@@ -170,6 +170,11 @@ func TestHardwareDecodeMatchesSoftware(t *testing.T) {
 // the end of the input, which the 30-frame clip reaches first, or after
 // HW_PENDING_MAX (64) packets, which the 100-frame clip reaches first. With
 // only the first, the long clip would lose its frames past the 64th.
+//
+// Samsung's Exynos decoder (Pixel 9a) does not give up: it decodes High 4:4:4
+// to 4:2:0 frames and leaves some out, 26 of 30 and 91 of 100, the same each
+// run (#86). That is what "force" asks for, the hardware with no profile
+// check, and there is no fallback to check, so the forced half skips there.
 func TestHardwareDecodeRefusedProfile(t *testing.T) {
 	if !hwPlatform() {
 		t.Skip("no hardware decoder in the bridge on " + runtime.GOOS)
@@ -188,11 +193,15 @@ func TestHardwareDecodeRefusedProfile(t *testing.T) {
 			}
 			def := hwDecodeAll(t, c.path, "1")
 			sameFrames(t, "GOFFMPEG_HWDECODE=1", def, sw)
-			forced := hwDecodeAll(t, c.path, "force")
-			sameFrames(t, "GOFFMPEG_HWDECODE=force", forced, sw)
 			if def.decoder != "h264" || def.last != "h264" {
 				t.Errorf("GOFFMPEG_HWDECODE=1: decoded with %q to %q, want h264 (the profile check)", def.decoder, def.last)
 			}
+			forced := hwDecodeAll(t, c.path, "force")
+			if runtime.GOOS == "android" && forced.decoder == hwName() && forced.last == hwName() {
+				t.Skipf("GOFFMPEG_HWDECODE=force: this device's MediaCodec decoded High 4:4:4 itself (%d frames, software %d), so there is no fallback to check",
+					len(forced.frames), len(sw.frames))
+			}
+			sameFrames(t, "GOFFMPEG_HWDECODE=force", forced, sw)
 			if runtime.GOOS == "android" {
 				// MediaCodec opens a 320x240 High 4:4:4 stream (it refuses
 				// to configure a smaller one), so this is the fallback
