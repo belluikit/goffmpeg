@@ -194,7 +194,8 @@ SET_HWACCELS =
 SET_INDEVS   =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
-	SET_DECODERS += h264 aac
+	# Android decodes AAC with its own decoder, aac_mediacodec, below (#77).
+	SET_DECODERS += h264 $(if $(filter android_%,$(TARGET)),,aac)
 	SET_PARSERS  += h264 aac
 	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
 	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3
@@ -239,9 +240,11 @@ endif
 # set already has. FFmpeg registers it after the software h264, so a lookup by
 # codec ID still returns h264; a caller that wants the phone's decoder opens it
 # by name.
-# The same for VP9 and AV1 (#78).
+# The same for VP9 and AV1 (#78), and for AAC (#77): Android's own AAC
+# decoder, so the phones need no FFmpeg AAC decoder. It selects the
+# aac_adtstoasc filter and the aac parser.
 ifeq ($(SET)$(filter android_%,$(TARGET)),media$(TARGET))
-	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec
+	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec aac_mediacodec
 endif
 
 # The desktop media set has every codec (owner, #41): the lists above are

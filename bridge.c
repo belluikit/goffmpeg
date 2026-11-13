@@ -4,6 +4,7 @@
 #include <libavutil/log.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/opt.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef __APPLE__
@@ -295,6 +296,62 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     d->hw = hw;
     return ctx;
 }
+
+// open_mediacodec_aac opens Android's own AAC decoder, through FFmpeg's
+// aac_mediacodec, so the phones carry no FFmpeg AAC decoder (#77). On every
+// device measured that is c2.android.aac.decoder, a software decoder in
+// Android's media process, so #85's refusal of a decoder with no hardware
+// would refuse it, and does not apply here. The setup is open_mediacodec's:
+// the log hook, the app's Java VM, the binder pool (#86) and the NDK API.
+// With a VM, FFmpeg's lookup through Java skips software-only decoders and
+// finds none for AAC; ndk_codec then makes it create one by type, as it does
+// with no VM.
+static void mediacodec_setup(void) {
+    pthread_once(&mediacodec_log_once, mediacodec_log_install);
+    pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
+    pthread_once(&mediacodec_pool_once, mediacodec_binder_pool);
+}
+static AVCodecContext *open_mediacodec_aac(AVStream *st) {
+    const AVCodec *codec = avcodec_find_decoder_by_name("aac_mediacodec");
+    if (!codec) return NULL;
+    mediacodec_setup();
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return NULL;
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "ndk_codec", "1", 0);
+    if (avcodec_open2(ctx, codec, &opts) < 0) avcodec_free_context(&ctx);
+    av_dict_free(&opts);
+    return ctx;
+}
+
+// mediacodec_probe_opts gives FFmpeg's stream probing the same setup for
+// AAC. avformat_find_stream_info decodes a little of each stream to learn
+// what the container does not say, such as the sample format, and HE-AAC's
+// real rate where the ADTS header gives only the core's. With no FFmpeg AAC
+// decoder (#77), it opens aac_mediacodec to do that. Without the binder pool a
+// Pixel 9a never returned from it, and with a Java VM and no ndk_codec the
+// lookup through Java fails. Returns the per-stream options for the call, or
+// NULL with no AAC stream; mediacodec_probe_opts_free frees them.
+static AVDictionary **mediacodec_probe_opts(AVFormatContext *fmt) {
+    AVDictionary **opts = NULL;
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        if (fmt->streams[i]->codecpar->codec_id != AV_CODEC_ID_AAC) continue;
+        if (!opts) {
+            if (!avcodec_find_decoder_by_name("aac_mediacodec")) return NULL;
+            opts = av_calloc(fmt->nb_streams, sizeof(*opts));
+            if (!opts) return NULL;
+            mediacodec_setup();
+        }
+        av_dict_set(&opts[i], "ndk_codec", "1", 0);
+    }
+    return opts;
+}
+static void mediacodec_probe_opts_free(AVDictionary **opts, unsigned n) {
+    if (!opts) return;
+    for (unsigned i = 0; i < n; i++) av_dict_free(&opts[i]);
+    av_free(opts);
+}
 #endif
 
 #ifdef __APPLE__
@@ -534,7 +591,18 @@ const char *decoder_video_decoder(Decoder *d) {
 // decoder_open_reader (custom IO) so every entry point produces identical
 // decoding behaviour.
 int decoder_setup_streams(Decoder *d) {
-    if (avformat_find_stream_info(d->fmt_ctx, NULL) < 0) return -2;
+    AVDictionary **probe_opts = NULL;
+    unsigned probe_streams = d->fmt_ctx->nb_streams;
+#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+    probe_opts = mediacodec_probe_opts(d->fmt_ctx);
+#endif
+    int probed = avformat_find_stream_info(d->fmt_ctx, probe_opts);
+#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+    mediacodec_probe_opts_free(probe_opts, probe_streams);
+#else
+    (void)probe_streams;
+#endif
+    if (probed < 0) return -2;
 
     // Video stream: none in an audio-only build, whose video packets are
     // then read and dropped (decoder_next sends a packet only to an open
@@ -566,18 +634,23 @@ int decoder_setup_streams(Decoder *d) {
     d->a_stream_idx = av_find_best_stream(d->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (d->a_stream_idx >= 0) {
         AVStream *st = d->fmt_ctx->streams[d->a_stream_idx];
-        const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
-        if (codec) {
+        const AVCodec *codec = NULL;
+#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+        // AAC goes to Android's decoder (#77).
+        if (st->codecpar->codec_id == AV_CODEC_ID_AAC) d->a_ctx = open_mediacodec_aac(st);
+#endif
+        if (!d->a_ctx && (codec = avcodec_find_decoder(st->codecpar->codec_id))) {
             d->a_ctx = avcodec_alloc_context3(codec);
             avcodec_parameters_to_context(d->a_ctx, st->codecpar);
-            if (avcodec_open2(d->a_ctx, codec, NULL) >= 0) {
-                d->sample_rate = d->a_ctx->sample_rate;
-                d->a_frame = av_frame_alloc();
-                // 0 = keep the stream's own layout. Callers that need a
-                // specific count (because the audio device is already open at
-                // one) ask for it via decoder_set_audio_channels.
-                decoder_set_audio_channels(d, 0);
-            }
+            if (avcodec_open2(d->a_ctx, codec, NULL) < 0) avcodec_free_context(&d->a_ctx);
+        }
+        if (d->a_ctx) {
+            d->sample_rate = d->a_ctx->sample_rate;
+            d->a_frame = av_frame_alloc();
+            // 0 = keep the stream's own layout. Callers that need a specific
+            // count (because the audio device is already open at one) ask for
+            // it via decoder_set_audio_channels.
+            decoder_set_audio_channels(d, 0);
         }
     }
 
@@ -994,11 +1067,51 @@ const char *decoder_frame_pix_fmt(Decoder *d) {
     return av_get_pix_fmt_name((enum AVPixelFormat)d->v_frame->format);
 }
 
+// swr_follow_frame rebuilds the resampler when the frame's rate, sample
+// format or channel layout is not what it was built for. It is built at open
+// from what the stream says, and a decoder can learn some of that only as it
+// decodes: Android's MediaCodec gives its output format with its first frame
+// (FFmpeg's aac_mediacodec, #77). The output stays what AudioInfo reported.
+// A rebuild drops what the old resampler held, which at the first frame is
+// nothing.
+static int swr_follow_frame(Decoder *d) {
+    const AVFrame *f = d->a_frame;
+    if (f->nb_samples <= 0) return 0;
+    int64_t rate = 0;
+    enum AVSampleFormat fmt = AV_SAMPLE_FMT_NONE;
+    AVChannelLayout in = {0}, out = {0};
+    av_opt_get_int(d->swr_ctx, "in_sample_rate", 0, &rate);
+    av_opt_get_sample_fmt(d->swr_ctx, "in_sample_fmt", 0, &fmt);
+    av_opt_get_chlayout(d->swr_ctx, "in_chlayout", 0, &in);
+    int same = rate == f->sample_rate && fmt == f->format && av_channel_layout_compare(&in, &f->ch_layout) == 0;
+    av_channel_layout_uninit(&in);
+    if (same) return 0;
+    int ret = av_opt_get_chlayout(d->swr_ctx, "out_chlayout", 0, &out);
+    struct SwrContext *swr = NULL;
+    if (ret >= 0)
+        ret = swr_alloc_set_opts2(&swr, &out, AV_SAMPLE_FMT_S16, d->sample_rate,
+                                  &f->ch_layout, (enum AVSampleFormat)f->format, f->sample_rate, 0, NULL);
+    av_channel_layout_uninit(&out);
+    if (ret >= 0) ret = swr_init(swr);
+    if (ret < 0) {
+        swr_free(&swr);
+        return ret;
+    }
+    swr_free(&d->swr_ctx);
+    d->swr_ctx = swr;
+    return 0;
+}
+
 int decoder_get_audio(Decoder *d, uint8_t **buffer) {
     if (!d->swr_ctx || !d->a_frame) return -1;
     if (d->channels <= 0) return -1;
-    int out_samples = av_rescale_rnd(swr_get_delay(d->swr_ctx, d->a_ctx->sample_rate) + d->a_frame->nb_samples,
-                                     d->sample_rate, d->a_ctx->sample_rate, AV_ROUND_UP);
+    int ret = swr_follow_frame(d);
+    if (ret < 0) return ret;
+    int64_t in_rate = 0;
+    av_opt_get_int(d->swr_ctx, "in_sample_rate", 0, &in_rate);
+    if (in_rate <= 0) return -1;
+    int out_samples = av_rescale_rnd(swr_get_delay(d->swr_ctx, in_rate) + d->a_frame->nb_samples,
+                                     d->sample_rate, in_rate, AV_ROUND_UP);
     int out_size = av_samples_get_buffer_size(NULL, d->channels, out_samples, AV_SAMPLE_FMT_S16, 0);
     if (out_size < 0) return out_size;
     if (out_size > d->audio_buf_size) {
@@ -1013,7 +1126,7 @@ int decoder_get_audio(Decoder *d, uint8_t **buffer) {
     // A frame with no samples is the end-of-stream one decoder_next hands out
     // (#24). swresample flushes only on a NULL input, not on a count of 0.
     const uint8_t **in = d->a_frame->nb_samples > 0 ? (const uint8_t **)d->a_frame->data : NULL;
-    int ret = swr_convert(d->swr_ctx, &d->audio_buf, out_samples, in, d->a_frame->nb_samples);
+    ret = swr_convert(d->swr_ctx, &d->audio_buf, out_samples, in, d->a_frame->nb_samples);
     if (ret < 0) return ret;
     *buffer = d->audio_buf;
     // Bytes produced: samples x channels x 2 (S16). This was hardcoded to

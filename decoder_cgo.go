@@ -167,6 +167,15 @@ func (d *cgoDecoder) videoDecoder() string {
 	return ""
 }
 
+// audioDecoder names the decoder the audio stream opened with ("aac",
+// "aac_mediacodec"), or "" with none. For tests (#77).
+func (d *cgoDecoder) audioDecoder() string {
+	if d.d.a_ctx == nil || d.d.a_ctx.codec == nil {
+		return ""
+	}
+	return C.GoString(d.d.a_ctx.codec.name)
+}
+
 func (d *cgoDecoder) VideoInfo() VideoInfo {
 	return VideoInfo{
 		Width:  int(d.d.width),
