@@ -707,7 +707,8 @@ jobs:
       # a real suite, and it was the one missing it. That is how a patch to
       # FFmpeg could be compiled here (`CC libavdevice/v4l2.o`) and have no
       # effect on the tests — which is exactly what happened while
-      # investigating #14, and cost a wrong conclusion about patches/0001.
+      # investigating #14, and cost a wrong conclusion about the v4l2 patch then
+      # in patches/.
       - name: Point the tests at the libraries just built
         run: |
           rm -rf "$RUNNER_TEMP/libs"

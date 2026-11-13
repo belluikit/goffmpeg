@@ -394,14 +394,22 @@ loudly rather than silently skipping when a patch no longer fits.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**The directory is currently empty**, which is where it should be. Its one
-occupant was a v4l2 `mmap_free` fix for #14, dropped at this FFmpeg bump
-because upstream `603234f945` had already made the same correction. That is
-the intended lifecycle: carry a fix only until the pin catches up.
+**It holds one patch.** `0001-mediacodecdec-stall-before-first-frame.patch`
+(#88) makes FFmpeg's MediaCodec decoder give up when, before its first frame,
+it has taken no input and returned no frame for 2 s. Without it the decode
+call never returns, and with it the bridge falls back to software. FFmpeg
+master still has the unbounded loop (checked 2026-11-12), and the patch has not
+been sent upstream yet. It goes when the pin reaches an FFmpeg that bounds the
+loop itself.
+
+Before it, the directory was empty. Its previous occupant was a v4l2
+`mmap_free` fix for #14, dropped at an FFmpeg bump because upstream
+`603234f945` had already made the same correction. That is the intended
+lifecycle: carry a fix only until the pin catches up.
 
 Before sending any patch here upstream, check whether it is already fixed on
-FFmpeg master. This one was, three months before we hit it, and the duplicate
-was one command away from going to a public mailing list:
+FFmpeg master. The #14 fix was, three months before we hit it, and the
+duplicate was one command away from going to a public mailing list:
 
 ```sh
 git -C ../ffmpeg fetch origin master

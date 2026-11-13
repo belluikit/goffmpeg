@@ -47,7 +47,8 @@ func reopenVerdict(t *testing.T, format string, args ...any) {
 // close. A mapped buffer keeps the driver's allocation alive even after the
 // descriptor is gone, so the next VIDIOC_S_FMT returned EBUSY — reported by
 // device_try_init without a log line, hence the bare -1 with no explanation.
-// patches/0001 carries the one-line fix.
+// Upstream 603234f945 fixed it, and until the FFmpeg pin reached that, a
+// local patch carried the same one-line fix.
 //
 // The asymmetry between failing and skipping is deliberate. Whether *any*
 // camera opens is machine state — a virtual camera such as OBS's needs OBS
