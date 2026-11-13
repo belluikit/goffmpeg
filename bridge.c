@@ -212,9 +212,39 @@ static void mediacodec_find_java_vm(void) {
 }
 static pthread_once_t mediacodec_vm_once = PTHREAD_ONCE_INIT;
 
+// mediacodec_binder_pool starts a binder thread pool in a process with no Java
+// VM, which has none unless it started one itself: a test binary, a
+// command-line tool, a daemon (#86). MediaCodec's decoder runs in a media
+// process and hands its results back over binder, as calls into this process.
+// Where the Codec2 service is the AIDL one (Pixel 9a, Android 17), nothing
+// receives them without a pool: MediaCodec takes two packets, then offers no
+// input buffer and gives no frame, and FFmpeg's mediacodec_receive_frame polls
+// both with no timeout, forever, without returning to the bridge, so the
+// HW_PENDING_MAX fallback (#81) never runs (measured: 14,782 polls in a
+// 5-second run, one core busy). The OnePlus Pad 2 and the moto g power 2024
+// decode without a pool.
+//
+// An app's process always has a pool, started before any app code runs, so a
+// process with a VM is left alone. On Android 10 and 11, where
+// mediacodec_find_java_vm finds no VM, an app makes the call too, and it does
+// nothing there: ABinderProcess_startThreadPool does nothing in a process
+// whose pool has started. It is in libbinder_ndk from Android 10 (API 29) and
+// is looked up at run time, so the library still loads before that, where
+// this does nothing.
+static void mediacodec_binder_pool(void) {
+    if (av_jni_get_java_vm(NULL)) return;
+    void *lib = dlopen("libbinder_ndk.so", RTLD_NOW);
+    if (!lib) return;
+    void (*start)(void) = (void (*)(void))dlsym(lib, "ABinderProcess_startThreadPool");
+    if (start) start();
+    // libbinder_ndk stays loaded: its threads run in it.
+}
+static pthread_once_t mediacodec_pool_once = PTHREAD_ONCE_INIT;
+
 static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
     pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
+    pthread_once(&mediacodec_pool_once, mediacodec_binder_pool);
     enum AVCodecID id = st->codecpar->codec_id;
     const AVCodec *codec = avcodec_find_decoder_by_name(
         id == AV_CODEC_ID_VP9 ? "vp9_mediacodec" : id == AV_CODEC_ID_AV1 ? "av1_mediacodec" : "h264_mediacodec");
