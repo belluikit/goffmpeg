@@ -231,7 +231,12 @@ static pthread_once_t mediacodec_vm_once = PTHREAD_ONCE_INIT;
 // whose pool has started. It is in libbinder_ndk from Android 10 (API 29) and
 // is looked up at run time, so the library still loads before that, where
 // this does nothing.
+//
+// GOFFMPEG_TEST_NO_BINDER_POOL=1 skips this, for TestHardwareDecodeStall: it
+// brings back #86's stall, which patches/0001 must end with a fallback (#88).
 static void mediacodec_binder_pool(void) {
+    const char *off = getenv("GOFFMPEG_TEST_NO_BINDER_POOL");
+    if (off && strcmp(off, "1") == 0) return;
     if (av_jni_get_java_vm(NULL)) return;
     void *lib = dlopen("libbinder_ndk.so", RTLD_NOW);
     if (!lib) return;
