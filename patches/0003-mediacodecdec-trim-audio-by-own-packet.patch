@@ -1,0 +1,138 @@
+avcodec/mediacodecdec: trim each audio frame by its own packet
+
+goffmpeg #77. Upstream: not submitted yet.
+
+The decoder's frames got the skip-samples side data of the last packet
+fetched (ff_get_buffer), but MediaCodec returns each frame a few
+packets after it took the frame's packet. So a packet's priming or
+padding trimmed a later frame, and at the end of the stream the last
+packet's padding trimmed every frame drained after it. Measured on a
+OnePlus Pad 2 (Android 16, c2.android.aac.decoder), AAC-LC in M4A with
+756 samples of padding: 3 x 756 = 2268 samples short, and a last
+1024-sample block that matched nothing in the source; AAC-LC 5.1 with
+888 of padding, 3 x 888 = 2664 short.
+
+Each packet's skip samples are now kept by the pts MediaCodec is given,
+and a frame gets the ones of the packet whose pts it comes out with.
+
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index e258a3e7d9..0af5ae9b4b 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -607,6 +607,8 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+ 
+         /* fetch new packet or eof */
+         ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
++        if (ret >= 0 && avctx->codec_type == AVMEDIA_TYPE_AUDIO)
++            ff_mediacodec_dec_note_skip(avctx, s->ctx, &s->buffered_pkt);
+         if (ret >= 0 && avctx->codec_id == AV_CODEC_ID_AAC && !avctx->extradata_size && !s->aac_config) {
+             size_t size;
+             const uint8_t *config = av_packet_get_side_data(&s->buffered_pkt, AV_PKT_DATA_NEW_EXTRADATA, &size);
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index c60d973929..1c8dee0897 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -26,6 +26,7 @@
+ #include "libavutil/avassert.h"
+ #include "libavutil/common.h"
+ #include "libavutil/hwcontext_mediacodec.h"
++#include "libavutil/intreadwrite.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/log.h"
+ #include "libavutil/pixfmt.h"
+@@ -424,6 +425,26 @@ static int mediacodec_wrap_sw_audio_buffer(AVCodecContext *avctx,
+     frame->pkt_dts = AV_NOPTS_VALUE;
+     frame->flags |= AV_FRAME_FLAG_KEY;
+ 
++    /* ff_get_buffer gave the frame the side data of the last packet
++     * fetched, which is a few packets ahead of this frame: its skip
++     * samples would trim the wrong frame, and the last packet's padding
++     * would trim each frame drained after it. Use this frame's own. */
++    av_frame_remove_side_data(frame, AV_FRAME_DATA_SKIP_SAMPLES);
++    for (int i = 0; i < s->nb_skip; i++) {
++        if (s->skip[i].pts > info->presentationTimeUs)
++            continue;
++        if (s->skip[i].pts == info->presentationTimeUs) {
++            AVFrameSideData *sd = av_frame_new_side_data(frame, AV_FRAME_DATA_SKIP_SAMPLES,
++                                                         sizeof(s->skip[i].data));
++            if (sd)
++                memcpy(sd->data, s->skip[i].data, sizeof(s->skip[i].data));
++        }
++        /* this frame's, or one for a frame that never came out */
++        memmove(&s->skip[i], &s->skip[i + 1], (s->nb_skip - i - 1) * sizeof(s->skip[0]));
++        s->nb_skip--;
++        i--;
++    }
++
+     av_log(avctx, AV_LOG_TRACE,
+            "Frame: format=%d channels=%d sample_rate=%d nb_samples=%d",
+            avctx->sample_fmt, avctx->ch_layout.nb_channels, avctx->sample_rate, frame->nb_samples);
+@@ -723,6 +744,7 @@ static int mediacodec_dec_flush_codec(AVCodecContext *avctx, MediaCodecDecContex
+     int status;
+ 
+     s->output_buffer_count = 0;
++    s->nb_skip = 0;
+ 
+     s->draining = 0;
+     s->flushing = 0;
+@@ -924,6 +946,29 @@ int ff_mediacodec_dec_send_config(AVCodecContext *avctx, MediaCodecDecContext *s
+     return 0;
+ }
+ 
++void ff_mediacodec_dec_note_skip(AVCodecContext *avctx, MediaCodecDecContext *s,
++                                 const AVPacket *pkt)
++{
++    size_t size;
++    const uint8_t *data = av_packet_get_side_data(pkt, AV_PKT_DATA_SKIP_SAMPLES, &size);
++    int64_t pts = pkt->pts;
++
++    if (!data || size < sizeof(s->skip[0].data) || !(AV_RL32(data) || AV_RL32(data + 4)))
++        return;
++    /* the pts ff_mediacodec_dec_send gives MediaCodec */
++    if (pts == AV_NOPTS_VALUE)
++        pts = 0;
++    if (pts && avctx->pkt_timebase.num && avctx->pkt_timebase.den)
++        pts = av_rescale_q(pts, avctx->pkt_timebase, AV_TIME_BASE_Q);
++    if (s->nb_skip == FF_ARRAY_ELEMS(s->skip)) {
++        memmove(&s->skip[0], &s->skip[1], (s->nb_skip - 1) * sizeof(s->skip[0]));
++        s->nb_skip--;
++    }
++    s->skip[s->nb_skip].pts = pts;
++    memcpy(s->skip[s->nb_skip].data, data, sizeof(s->skip[0].data));
++    s->nb_skip++;
++}
++
+ int ff_mediacodec_dec_send(AVCodecContext *avctx, MediaCodecDecContext *s,
+                            AVPacket *pkt, bool wait)
+ {
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index fd67451e51..4a9111aa3b 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -71,6 +71,15 @@ typedef struct MediaCodecDecContext {
+     atomic_int serial;
+ 
+     bool use_ndk_codec;
++
++    /* Audio: the skip-samples side data of packets sent, by their pts in
++     * microseconds, so each frame gets its own packet's rather than the last
++     * packet fetched. MediaCodec returns frames a few packets behind. */
++    struct {
++        int64_t pts;
++        uint8_t data[10];
++    } skip[8];
++    int nb_skip;
+ } MediaCodecDecContext;
+ 
+ int ff_mediacodec_dec_init(AVCodecContext *avctx,
+@@ -83,6 +92,10 @@ int ff_mediacodec_dec_send_config(AVCodecContext *avctx,
+                                   const uint8_t *config,
+                                   size_t config_size);
+ 
++void ff_mediacodec_dec_note_skip(AVCodecContext *avctx,
++                                 MediaCodecDecContext *s,
++                                 const AVPacket *pkt);
++
+ int ff_mediacodec_dec_send(AVCodecContext *avctx,
+                            MediaCodecDecContext *s,
+                            AVPacket *pkt,

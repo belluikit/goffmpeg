@@ -1,0 +1,217 @@
+avcodec/mediacodecdec: decode AAC from ADTS
+
+goffmpeg #77. Upstream: not submitted yet.
+
+AAC from ADTS or MPEG-TS has no AudioSpecificConfig when the decoder
+opens, so MediaCodec was configured without one, and aac_adtstoasc then
+stripped the ADTS headers that carry it. MediaCodec took every packet
+and returned no samples, with no error. Measured on a OnePlus Pad 2
+(Android 16, c2.android.aac.decoder, "Invalid AAC stream" for each
+packet): 0 samples from AAC-LC and HE-AAC in ADTS and from an HLS
+stream, against 135168, 139264 and 90112 from the aac decoder.
+KEY_IS_ADTS, with the headers left in, gave the same errors there.
+
+aac_adtstoasc builds the AudioSpecificConfig from the first frame's
+header and attaches it to that packet as new extradata. MediaCodec is
+now given it as a codec config buffer before that frame, and again after
+a flush.
+
+ADTS also gives no sample rate or channel count before the first frame
+is decoded: the aac parser leaves both to the decoder, because SBR and
+PS change them. So without the aac decoder, avformat_find_stream_info
+could not open aac_mediacodec at all ("Invalid sample rate: 0"), and the
+stream had no decoder. The decoder now has AV_CODEC_CAP_CHANNEL_CONF,
+as aac does, and configures MediaCodec with 44.1 kHz stereo when the
+stream has not said; the codec config buffer gives MediaCodec the real
+ones, and its output format gives them to the caller.
+
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index 234da5a487..e258a3e7d9 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -60,6 +60,12 @@ typedef struct MediaCodecContext {
+     int use_ndk_codec;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
++
++    // AAC with no extradata: the AudioSpecificConfig aac_adtstoasc made from
++    // the first ADTS header, and whether MediaCodec still has to be given it
++    uint8_t *aac_config;
++    size_t aac_config_size;
++    int aac_config_pending;
+ } MediaCodecContext;
+ 
+ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -69,6 +75,8 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+     ff_mediacodec_dec_close(avctx, s->ctx);
+     s->ctx = NULL;
+ 
++    av_freep(&s->aac_config);
++
+     av_packet_unref(&s->buffered_pkt);
+ 
+     return 0;
+@@ -436,8 +444,19 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+         ff_AMediaFormat_setInt32(format, "width", avctx->width);
+         ff_AMediaFormat_setInt32(format, "height", avctx->height);
+     } else {
+-        ff_AMediaFormat_setInt32(format, "channel-count", avctx->ch_layout.nb_channels);
+-        ff_AMediaFormat_setInt32(format, "sample-rate", avctx->sample_rate);
++        int channels = avctx->ch_layout.nb_channels;
++        int sample_rate = avctx->sample_rate;
++        /* AAC from ADTS: the demuxer and parser leave both to the decoder,
++         * and MediaCodec takes them from the codec config buffer. It still
++         * needs some to be configured. */
++        if (avctx->codec_id == AV_CODEC_ID_AAC && !avctx->extradata_size) {
++            if (channels <= 0)
++                channels = 2;
++            if (sample_rate <= 0)
++                sample_rate = 44100;
++        }
++        ff_AMediaFormat_setInt32(format, "channel-count", channels);
++        ff_AMediaFormat_setInt32(format, "sample-rate", sample_rate);
+     }
+     if (s->operating_rate > 0)
+         ff_AMediaFormat_setInt32(format, "operating-rate", s->operating_rate);
+@@ -549,6 +568,18 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+             stall_start = 0;
+         }
+ 
++        /* AAC from ADTS or MPEG-TS has no AudioSpecificConfig at init, so
++         * MediaCodec was configured without one. It is given the one
++         * aac_adtstoasc made from the first frame's header, as a codec config
++         * buffer, before that frame, and again after a flush. */
++        if (s->aac_config_pending && s->ctx->current_input_buffer >= 0) {
++            ret = ff_mediacodec_dec_send_config(avctx, s->ctx, s->aac_config, s->aac_config_size);
++            if (ret < 0)
++                return ret;
++            s->aac_config_pending = 0;
++            continue;
++        }
++
+         /* try to flush any buffered packet data */
+         if (s->buffered_pkt.size > 0) {
+             ret = ff_mediacodec_dec_send(avctx, s->ctx, &s->buffered_pkt, false);
+@@ -576,6 +607,17 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+ 
+         /* fetch new packet or eof */
+         ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
++        if (ret >= 0 && avctx->codec_id == AV_CODEC_ID_AAC && !avctx->extradata_size && !s->aac_config) {
++            size_t size;
++            const uint8_t *config = av_packet_get_side_data(&s->buffered_pkt, AV_PKT_DATA_NEW_EXTRADATA, &size);
++            if (config && size) {
++                if (!(s->aac_config = av_memdup(config, size)))
++                    return AVERROR(ENOMEM);
++                s->aac_config_size = size;
++                s->aac_config_pending = 1;
++                continue;
++            }
++        }
+         if (ret == AVERROR_EOF) {
+             AVPacket null_pkt = { 0 };
+             ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
+@@ -597,6 +639,7 @@ static void mediacodec_decode_flush(AVCodecContext *avctx)
+     MediaCodecContext *s = avctx->priv_data;
+ 
+     av_packet_unref(&s->buffered_pkt);
++    s->aac_config_pending = s->aac_config != NULL;
+ 
+     ff_mediacodec_dec_flush(avctx, s->ctx);
+ }
+@@ -699,7 +742,7 @@ static const AVClass ff_##short_name##_mediacodec_dec_class = { \
+     .version    = LIBAVUTIL_VERSION_INT,                        \
+ };
+ 
+-#define DECLARE_MEDIACODEC_ADEC(short_name, full_name, codec_id, bsf)                          \
++#define DECLARE_MEDIACODEC_ADEC(short_name, full_name, codec_id, bsf, caps)                    \
+ DECLARE_MEDIACODEC_ACLASS(short_name)                                                          \
+ const FFCodec ff_ ## short_name ## _mediacodec_decoder = {                                     \
+     .p.name         = #short_name "_mediacodec",                                               \
+@@ -712,24 +755,26 @@ const FFCodec ff_ ## short_name ## _mediacodec_decoder = {
+     FF_CODEC_RECEIVE_FRAME_CB(mediacodec_receive_frame),                                       \
+     .flush          = mediacodec_decode_flush,                                                 \
+     .close          = mediacodec_decode_close,                                                 \
+-    .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE,                              \
++    .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE | caps,                       \
+     .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE,                                        \
+     .bsfs           = bsf,                                                                     \
+     .p.wrapper_name = "mediacodec",                                                            \
+ };                                                                                             \
+ 
+ #if CONFIG_AAC_MEDIACODEC_DECODER
+-DECLARE_MEDIACODEC_ADEC(aac, "AAC", AV_CODEC_ID_AAC, "aac_adtstoasc")
++/* AAC from ADTS has no sample rate or channel count until the decoder reads
++ * the first frame's header. */
++DECLARE_MEDIACODEC_ADEC(aac, "AAC", AV_CODEC_ID_AAC, "aac_adtstoasc", AV_CODEC_CAP_CHANNEL_CONF)
+ #endif
+ 
+ #if CONFIG_AMRNB_MEDIACODEC_DECODER
+-DECLARE_MEDIACODEC_ADEC(amrnb, "AMR-NB", AV_CODEC_ID_AMR_NB, NULL)
++DECLARE_MEDIACODEC_ADEC(amrnb, "AMR-NB", AV_CODEC_ID_AMR_NB, NULL, 0)
+ #endif
+ 
+ #if CONFIG_AMRWB_MEDIACODEC_DECODER
+-DECLARE_MEDIACODEC_ADEC(amrwb, "AMR-WB", AV_CODEC_ID_AMR_WB, NULL)
++DECLARE_MEDIACODEC_ADEC(amrwb, "AMR-WB", AV_CODEC_ID_AMR_WB, NULL, 0)
+ #endif
+ 
+ #if CONFIG_MP3_MEDIACODEC_DECODER
+-DECLARE_MEDIACODEC_ADEC(mp3, "MP3", AV_CODEC_ID_MP3, NULL)
++DECLARE_MEDIACODEC_ADEC(mp3, "MP3", AV_CODEC_ID_MP3, NULL, 0)
+ #endif
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 0cb9c092d7..c60d973929 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -895,6 +895,35 @@ fail:
+     return ret;
+ }
+ 
++int ff_mediacodec_dec_send_config(AVCodecContext *avctx, MediaCodecDecContext *s,
++                                  const uint8_t *config, size_t config_size)
++{
++    FFAMediaCodec *codec = s->codec;
++    ssize_t index = s->current_input_buffer;
++    uint8_t *data;
++    size_t size;
++    int status;
++
++    if (index < 0)
++        return AVERROR(EAGAIN);
++    s->current_input_buffer = -1;
++
++    data = ff_AMediaCodec_getInputBuffer(codec, index, &size);
++    if (!data || size < config_size) {
++        av_log(avctx, AV_LOG_ERROR, "Failed to get an input buffer for the codec config\n");
++        return AVERROR_EXTERNAL;
++    }
++    memcpy(data, config, config_size);
++    status = ff_AMediaCodec_queueInputBuffer(codec, index, 0, config_size, 0,
++                                             ff_AMediaCodec_getBufferFlagCodecConfig(codec));
++    if (status < 0) {
++        av_log(avctx, AV_LOG_ERROR, "Failed to queue the codec config (status = %d)\n", status);
++        return AVERROR_EXTERNAL;
++    }
++    av_log(avctx, AV_LOG_DEBUG, "Queued codec config, %zu bytes\n", config_size);
++    return 0;
++}
++
+ int ff_mediacodec_dec_send(AVCodecContext *avctx, MediaCodecDecContext *s,
+                            AVPacket *pkt, bool wait)
+ {
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index 0ab29036bd..fd67451e51 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -78,6 +78,11 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx,
+                            const char *mime,
+                            FFAMediaFormat *format);
+ 
++int ff_mediacodec_dec_send_config(AVCodecContext *avctx,
++                                  MediaCodecDecContext *s,
++                                  const uint8_t *config,
++                                  size_t config_size);
++
+ int ff_mediacodec_dec_send(AVCodecContext *avctx,
+                            MediaCodecDecContext *s,
+                            AVPacket *pkt,

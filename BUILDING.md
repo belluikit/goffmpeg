@@ -391,19 +391,35 @@ every entry is something to reconcile at the next FFmpeg bump — but waiting fo
 an upstream release to ship a fix we have already written is worse.
 
 Applying is idempotent (`dist-all` configures seven targets from one source
-tree, so it runs repeatedly against an already-patched checkout) and it fails
-loudly rather than silently skipping when a patch no longer fits.
+tree, and CI builds two codec sets from one, so it runs repeatedly against an
+already-patched checkout) and it fails loudly rather than silently skipping
+when a patch no longer fits. Once the set applies, `patch-src` writes a
+checksum of it to `.goffmpeg-patches` in the FFmpeg checkout, and a later run
+that finds the same checksum, with the last patch in place, does nothing. Two
+patches that touch neighbouring lines need that: with both applied, the first
+no longer reverses on its own, which was the only check before.
 
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds one patch.** `0001-mediacodecdec-stall-before-first-frame.patch`
-(#88) makes FFmpeg's MediaCodec decoder give up when, before its first frame,
-it has taken no input and returned no frame for 2 s. Without it the decode
-call never returns, and with it the bridge falls back to software. FFmpeg
-master still has the unbounded loop (checked 2026-11-12), and the patch has not
-been sent upstream yet. It goes when the pin reaches an FFmpeg that bounds the
-loop itself.
+**It holds four patches**, all to FFmpeg's Android MediaCodec decoders. None
+has been sent upstream yet, and FFmpeg master had none of these fixes when
+they were written (checked 2026-11-12 and 2026-11-13). Each goes when the pin
+reaches an FFmpeg that fixes it.
+
+- `0001-mediacodecdec-stall-before-first-frame.patch` (#88): a MediaCodec that,
+  before its first frame, takes no input and returns no frame for 2 s makes
+  the decode give up instead of never returning, and the bridge falls back to
+  software.
+- `0002-mediacodecdec-aac-from-adts.patch` (#77): `aac_mediacodec` decodes
+  AAC from ADTS and MPEG-TS, and so from HLS. It had no AudioSpecificConfig to
+  give MediaCodec there, and returned no samples.
+- `0003-mediacodecdec-trim-audio-by-own-packet.patch` (#77): each audio frame
+  is trimmed by its own packet's priming and padding. The last packet's
+  padding used to trim several frames, losing the end of every MP4.
+- `0004-mediacodecdec-audio-frame-size.patch` (#77): the audio decoders report
+  a frame size, without which raw ADTS packets had no timestamps and could not
+  be seeked.
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream
