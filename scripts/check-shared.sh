@@ -161,6 +161,10 @@ android_*)
 	if [ "${SET:-media}" = media ]; then
 		LC_ALL=C grep -aqF 'Failed to getCodecNameByType(' "$dir/libavcodec-goffmpeg.so" ||
 			err "libavcodec has no \"Failed to getCodecNameByType(\" log line, which bridge.c's open_mediacodec watches for (#85)"
+		# patches/0001 bounds MediaCodec's stall before its first frame
+		# (#88). Its log line is the mark that the patch is in the build.
+		LC_ALL=C grep -aqF 'MediaCodec took no input and returned no frame for' "$dir/libavcodec-goffmpeg.so" ||
+			err "libavcodec lacks patches/0001-mediacodecdec-stall-before-first-frame.patch (#88): its log line is missing"
 	fi
 	;;
 esac
