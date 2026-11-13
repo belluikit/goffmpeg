@@ -61,10 +61,10 @@ func TestHardwareDecodeStall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// goffmpeg-libs v0.9.1 and later carry the patch. Without it, the
+	// stalled child below would only end at the 60 s timeout.
 	if !bytes.Contains(data, []byte(stallPatchMark)) {
-		// DROP at the go.mod bump to the goffmpeg-libs release that
-		// carries patches/0001: from then on every build has it.
-		t.Skip(lib + " has no patches/0001 (#88): a goffmpeg-libs release before it")
+		t.Fatal(lib + " has no patches/0001 (#88): it is older than goffmpeg-libs v0.9.1")
 	}
 	// run returns the child's frames and hash and the decoder it reported,
 	// and how long it took.
