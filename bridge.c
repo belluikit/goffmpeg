@@ -300,12 +300,13 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
 // open_mediacodec_aac opens Android's own AAC decoder, through FFmpeg's
 // aac_mediacodec, so the phones carry no FFmpeg AAC decoder (#77). On every
 // device measured that is c2.android.aac.decoder, a software decoder in
-// Android's media process, so #85's refusal of a decoder with no hardware
-// would refuse it, and does not apply here. The setup is open_mediacodec's:
-// the log hook, the app's Java VM, the binder pool (#86) and the NDK API.
-// With a VM, FFmpeg's lookup through Java skips software-only decoders and
-// finds none for AAC; ndk_codec then makes it create one by type, as it does
-// with no VM.
+// Android's media process. #85's refusal of a decoder with no hardware does
+// not apply: FFmpeg's audio decoders do no lookup by profile, and create
+// theirs by type (mediacodecdec_common.c, mediacodec_dec_get_audio_codec), so
+// there is no failed lookup to watch for. The setup is open_mediacodec's: the
+// log hook, the binder pool (#86) and the NDK API, which ndk_codec keeps even
+// once a video open has given FFmpeg the app's Java VM. With the VM, FFmpeg
+// would use MediaCodec's Java API instead, which was not measured.
 static void mediacodec_setup(void) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
     pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
@@ -330,9 +331,9 @@ static AVCodecContext *open_mediacodec_aac(AVStream *st) {
 // what the container does not say, such as the sample format, and HE-AAC's
 // real rate where the ADTS header gives only the core's. With no FFmpeg AAC
 // decoder (#77), it opens aac_mediacodec to do that. Without the binder pool a
-// Pixel 9a never returned from it, and with a Java VM and no ndk_codec the
-// lookup through Java fails. Returns the per-stream options for the call, or
-// NULL with no AAC stream; mediacodec_probe_opts_free frees them.
+// Pixel 9a never returned from it, and without ndk_codec it would use the Java
+// API once a VM is set. Returns the per-stream options for the call, or NULL
+// with no AAC stream; mediacodec_probe_opts_free frees them.
 static AVDictionary **mediacodec_probe_opts(AVFormatContext *fmt) {
     AVDictionary **opts = NULL;
     for (unsigned i = 0; i < fmt->nb_streams; i++) {
