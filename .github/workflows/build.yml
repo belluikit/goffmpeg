@@ -35,6 +35,9 @@ env:
   # dav1d, the AV1 decoder built into the media set's libavcodec (#78): release
   # 1.5.2, by commit, beside FFmpeg.
   DAV1D_REPO: https://code.videolan.org/videolan/dav1d.git
+  # VideoLAN's GitHub mirror, cloned when code.videolan.org does not answer
+  # (#92). The DAV1D_REF check after the clone holds for either source.
+  DAV1D_MIRROR: https://github.com/videolan/dav1d.git
   DAV1D_TAG: "1.5.2"
   DAV1D_REF: c720f4d3556a01916324aea155555d3efba842e8
   # llvm-mingw, the toolchain for windows_arm64. Pinned with its digest from
@@ -169,7 +172,14 @@ jobs:
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
-          rm -rf ../dav1d && git clone --depth 1 --branch "$DAV1D_TAG" "$DAV1D_REPO" ../dav1d
+          for repo in "$DAV1D_REPO" "$DAV1D_MIRROR"; do
+            rm -rf ../dav1d
+            if git clone --depth 1 --branch "$DAV1D_TAG" "$repo" ../dav1d; then
+              echo "dav1d $DAV1D_TAG from $repo"; break
+            fi
+            echo "::warning::dav1d: cloning $repo failed"
+          done
+          [ -d ../dav1d/.git ] || { echo "::error::dav1d: no source answered"; exit 1; }
           test "$(git -C ../dav1d rev-parse HEAD)" = "$DAV1D_REF" \
             || { echo "::error::dav1d $DAV1D_TAG is not $DAV1D_REF"; exit 1; }
 
@@ -356,7 +366,14 @@ jobs:
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
-          rm -rf ../dav1d && git clone --depth 1 --branch "$DAV1D_TAG" "$DAV1D_REPO" ../dav1d
+          for repo in "$DAV1D_REPO" "$DAV1D_MIRROR"; do
+            rm -rf ../dav1d
+            if git clone --depth 1 --branch "$DAV1D_TAG" "$repo" ../dav1d; then
+              echo "dav1d $DAV1D_TAG from $repo"; break
+            fi
+            echo "::warning::dav1d: cloning $repo failed"
+          done
+          [ -d ../dav1d/.git ] || { echo "::error::dav1d: no source answered"; exit 1; }
           test "$(git -C ../dav1d rev-parse HEAD)" = "$DAV1D_REF" \
             || { echo "::error::dav1d $DAV1D_TAG is not $DAV1D_REF"; exit 1; }
 
@@ -681,7 +698,14 @@ jobs:
         run: |
           rm -rf ../ffmpeg && git clone --filter=blob:none "$FFMPEG_REPO" ../ffmpeg
           git -C ../ffmpeg checkout --detach "$FFMPEG_REF"
-          rm -rf ../dav1d && git clone --depth 1 --branch "$DAV1D_TAG" "$DAV1D_REPO" ../dav1d
+          for repo in "$DAV1D_REPO" "$DAV1D_MIRROR"; do
+            rm -rf ../dav1d
+            if git clone --depth 1 --branch "$DAV1D_TAG" "$repo" ../dav1d; then
+              echo "dav1d $DAV1D_TAG from $repo"; break
+            fi
+            echo "::warning::dav1d: cloning $repo failed"
+          done
+          [ -d ../dav1d/.git ] || { echo "::error::dav1d: no source answered"; exit 1; }
           test "$(git -C ../dav1d rev-parse HEAD)" = "$DAV1D_REF" \
             || { echo "::error::dav1d $DAV1D_TAG is not $DAV1D_REF"; exit 1; }
 
