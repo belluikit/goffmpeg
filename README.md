@@ -182,8 +182,9 @@ H.264 decoder either (#77): on the phone's hardware decoder, and on Android's
 own software decoder (`c2.android.avc.decoder`, opened by name through
 `patches/0007`) for what the hardware can't do: a stream it refuses at open,
 as the OnePlus Pad 2's refuses 64×64, or one it opens and gives no frame from,
-as the moto g power 2024's does 32×24, whose packets are then replayed to the
-software decoder. Below 1280×720 that costs more than FFmpeg's decoder
+whose packets are then replayed to the software decoder. H.264 smaller than
+64 pixels on either side goes straight to the software decoder, below the size
+MediaTek's hardware decoder decodes in full (#101). Below 1280×720 that costs more than FFmpeg's decoder
 did on a MediaTek phone (measured on #77: 55–68% of a core against 14–34% on
 the moto g power 2024) and about the same on the OnePlus Pad 2 and the Pixel 9a.
 VP9 and AV1 decode on MediaCodec (`vp9_mediacodec`, `av1_mediacodec`) when the

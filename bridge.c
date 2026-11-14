@@ -416,7 +416,24 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st, const char *nam
 // sent are kept and replayed to the software decoder (hw_fallback), as they
 // were to FFmpeg's h264 before (owner, 2026-11-14). The software decoder has
 // nothing behind it. NULL when both refuse, and the stream is left out (#41).
+// ANDROID_AVC_MIN_SIDE: H.264 narrower or shorter than this goes straight to
+// Android's software decoder (#101). Measured 2026-11-14 with 10-frame clips
+// from 16x16 to 128x96: MediaTek's hardware decoder (moto g power 2024) takes
+// every one below 64x64 (64x48, 48x48, 32x24, ...) and gives no frame or only
+// some, with no error, and decodes 64x64 and up in full; Qualcomm's (OnePlus
+// Pad 2) refuses below 96x96 and Exynos's (Pixel 9a) below 32x32, at open;
+// Android's software decoder decodes every size in full on all three. A
+// picture that small costs nothing to decode in software.
+#define ANDROID_AVC_MIN_SIDE 64
+
 static AVCodecContext *open_android_h264(Decoder *d, AVStream *st) {
+    const AVCodecParameters *par = st->codecpar;
+    if (par->width > 0 && par->height > 0 &&
+        (par->width < ANDROID_AVC_MIN_SIDE || par->height < ANDROID_AVC_MIN_SIDE)) {
+        AVCodecContext *ctx = open_mediacodec(d, st, ANDROID_AVC);
+        if (ctx) d->hw->no_fallback = 1;
+        return ctx;
+    }
     AVCodecContext *ctx = open_mediacodec(d, st, NULL);
     if (ctx) {
         d->hw->android_fallback = 1;

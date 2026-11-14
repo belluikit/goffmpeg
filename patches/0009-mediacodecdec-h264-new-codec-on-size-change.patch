@@ -1,0 +1,199 @@
+avcodec/mediacodecdec: make H.264's codec again when the SPS changes the size
+
+goffmpeg #101. Upstream: not submitted yet.
+
+h264_mediacodec configures MediaCodec once, with the first SPS and PPS,
+and sends every packet after to that codec, a new SPS included. Some
+decoders carry on through a resolution change; MediaTek's does not.
+Measured on a moto g power 2024 (Android 14), goffmpeg's
+sample_size_change.ts (MPEG-TS, 320x240 then 640x360) gives 5 of its 35
+frames and none after the change, where a OnePlus Pad 2 and a Pixel 9a
+give all 35.
+
+A packet whose SPS describes a picture of another size than the codec's
+is now held. The codec is drained, the frames of the old size come out,
+and a new codec is made for the packet's SPS and PPS, which then get the
+packet. A repeated SPS of the same size, as MPEG-TS sends one with every
+IDR, changes nothing.
+
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index 4d0a392c2e..4a902be0c8 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -37,6 +37,7 @@
+ #include "avcodec.h"
+ #include "codec_internal.h"
+ #include "decode.h"
++#include "h2645_parse.h"
+ #include "h264_parse.h"
+ #include "h264_ps.h"
+ #include "hevc/parse.h"
+@@ -65,6 +66,13 @@ typedef struct MediaCodecContext {
+     char *codec_name;
+     // The colour description came from the stream's SPS
+     int colour_from_stream;
++    // H.264: the size of the picture the codec was configured with, from the
++    // SPS, and a packet whose SPS changes it, held while the codec drains
++    int sps_width, sps_height;
++    AVPacket reconfig_pkt;
++    int reconfig;
++    uint8_t *reconfig_extradata;
++    int reconfig_extradata_size;
+ 
+     // AAC with no extradata: the AudioSpecificConfig aac_adtstoasc made from
+     // the first ADTS header, and whether MediaCodec still has to be given it
+@@ -83,10 +91,100 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+     av_freep(&s->aac_config);
+ 
+     av_packet_unref(&s->buffered_pkt);
++    av_packet_unref(&s->reconfig_pkt);
++    av_freep(&s->reconfig_extradata);
+ 
+     return 0;
+ }
+ 
++#if CONFIG_H264_MEDIACODEC_DECODER
++/* The SPS and PPS of an Annex B packet (h264_mp4toannexb has made every
++ * packet Annex B), as extradata, when its SPS describes a picture of another
++ * size than the codec's: a resolution change mid-stream. Some decoders carry
++ * on through one; MediaTek's (moto g power 2024) gives no frame after it.
++ * Returns 1 and sets *extradata when the size changes, 0 when not. */
++static int h264_size_change(AVCodecContext *avctx, const AVPacket *pkt,
++                            uint8_t **extradata, int *extradata_size)
++{
++    MediaCodecContext *s = avctx->priv_data;
++    H2645Packet nals = { 0 };
++    H264ParamSets ps = { 0 };
++    const H2645NAL *sps_nal = NULL, *pps_nal = NULL;
++    int ret, changed = 0;
++
++    if (!s->sps_width || pkt->size < 5)
++        return 0;
++    ret = ff_h2645_packet_split(&nals, pkt->data, pkt->size, avctx, 0, AV_CODEC_ID_H264, 0);
++    if (ret < 0)
++        goto done;
++    for (int i = 0; i < nals.nb_nals; i++) {
++        if (nals.nals[i].type == H264_NAL_SPS && !sps_nal)
++            sps_nal = &nals.nals[i];
++        if (nals.nals[i].type == H264_NAL_PPS && !pps_nal)
++            pps_nal = &nals.nals[i];
++    }
++    if (sps_nal && pps_nal) {
++        GetBitContext gb = sps_nal->gb;
++        if (ff_h264_decode_seq_parameter_set(&gb, avctx, &ps, 1) >= 0) {
++            for (int i = 0; i < MAX_SPS_COUNT; i++) {
++                const SPS *sps = ps.sps_list[i];
++                int w, h;
++                if (!sps)
++                    continue;
++                w = 16 * sps->mb_width  - sps->crop_left - sps->crop_right;
++                h = 16 * sps->mb_height - sps->crop_top  - sps->crop_bottom;
++                changed = w != s->sps_width || h != s->sps_height;
++                break;
++            }
++        }
++    }
++    if (changed) {
++        int size = 4 + sps_nal->raw_size + 4 + pps_nal->raw_size;
++        uint8_t *p = av_mallocz(size + AV_INPUT_BUFFER_PADDING_SIZE);
++        if (!p) {
++            ret = AVERROR(ENOMEM);
++            goto done;
++        }
++        *extradata = p;
++        *extradata_size = size;
++        AV_WB32(p, 1);
++        memcpy(p + 4, sps_nal->raw_data, sps_nal->raw_size);
++        p += 4 + sps_nal->raw_size;
++        AV_WB32(p, 1);
++        memcpy(p + 4, pps_nal->raw_data, pps_nal->raw_size);
++    }
++    ret = changed;
++done:
++    ff_h264_ps_uninit(&ps);
++    ff_h2645_packet_uninit(&nals);
++    return ret;
++}
++
++static av_cold int mediacodec_decode_init(AVCodecContext *avctx);
++
++/* After the codec has drained the frames of the old size: a new codec for the
++ * held packet's parameter sets, then that packet. */
++static int h264_reconfigure(AVCodecContext *avctx, uint8_t *extradata, int extradata_size)
++{
++    MediaCodecContext *s = avctx->priv_data;
++    int ret;
++
++    av_log(avctx, AV_LOG_VERBOSE, "The SPS changes the size; reconfiguring MediaCodec\n");
++    ff_mediacodec_dec_close(avctx, s->ctx);
++    s->ctx = NULL;
++    av_freep(&avctx->extradata);
++    avctx->extradata = extradata;
++    avctx->extradata_size = extradata_size;
++    avctx->width = avctx->height = 0;
++    if ((ret = mediacodec_decode_init(avctx)) < 0)
++        return ret;
++    av_packet_unref(&s->buffered_pkt);
++    av_packet_move_ref(&s->buffered_pkt, &s->reconfig_pkt);
++    s->reconfig = 0;
++    return 0;
++}
++#endif
++
+ #if CONFIG_H264_MEDIACODEC_DECODER || CONFIG_HEVC_MEDIACODEC_DECODER
+ static int h2645_ps_to_nalu(const uint8_t *src, int src_size, uint8_t **out, int *out_size)
+ {
+@@ -204,6 +302,8 @@ static int h264_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
+             avctx->width  = 16 * sps->mb_width  - sps->crop_left - sps->crop_right;
+             avctx->height = 16 * sps->mb_height - sps->crop_top  - sps->crop_bottom;
+         }
++        ((MediaCodecContext *)avctx->priv_data)->sps_width  = 16 * sps->mb_width  - sps->crop_left - sps->crop_right;
++        ((MediaCodecContext *)avctx->priv_data)->sps_height = 16 * sps->mb_height - sps->crop_top  - sps->crop_bottom;
+ 
+         if ((ret = h2645_ps_to_nalu(sps->data, sps->data_size, &data, &data_size)) < 0) {
+             goto done;
+@@ -558,6 +658,20 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+         }
+     }
+ 
++#if CONFIG_H264_MEDIACODEC_DECODER
++    /* A resolution change: the codec drains the old size's frames, then is
++     * made again for the new size. */
++    if (s->reconfig) {
++        ret = ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
++        if (ret != AVERROR_EOF)
++            return ret;
++        ret = h264_reconfigure(avctx, s->reconfig_extradata, s->reconfig_extradata_size);
++        s->reconfig_extradata = NULL;
++        if (ret < 0)
++            return ret;
++    }
++#endif
++
+     /* poll for new frame */
+     ret = ff_mediacodec_dec_receive(avctx, s->ctx, frame, false);
+     if (ret != AVERROR(EAGAIN))
+@@ -640,6 +754,23 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+ 
+         /* fetch new packet or eof */
+         ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
++#if CONFIG_H264_MEDIACODEC_DECODER
++        if (ret >= 0 && avctx->codec_id == AV_CODEC_ID_H264) {
++            int changed = h264_size_change(avctx, &s->buffered_pkt,
++                                           &s->reconfig_extradata, &s->reconfig_extradata_size);
++            if (changed < 0)
++                return changed;
++            if (changed) {
++                AVPacket null_pkt = { 0 };
++                av_packet_move_ref(&s->reconfig_pkt, &s->buffered_pkt);
++                s->reconfig = 1;
++                ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
++                if (ret < 0)
++                    return ret;
++                return mediacodec_receive_frame(avctx, frame);
++            }
++        }
++#endif
+         if (ret >= 0 && avctx->codec_type == AVMEDIA_TYPE_AUDIO)
+             ff_mediacodec_dec_note_skip(avctx, s->ctx, &s->buffered_pkt);
+         if (ret >= 0 && avctx->codec_id == AV_CODEC_ID_AAC && !avctx->extradata_size && !s->aac_config) {
