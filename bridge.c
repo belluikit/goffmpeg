@@ -821,6 +821,16 @@ int decoder_setup_streams(Decoder *d) {
         AVStream *st = d->fmt_ctx->streams[d->v_stream_idx];
         d->v_ctx = open_video(d, st);
         if (d->v_ctx) {
+            // A stream probing did not decode (H.264 with no FFmpeg h264 to
+            // decode it, #77) can come out of HLS with no size; the decoder
+            // has it, from the SPS (patches/0008). av_seek_frame picks the
+            // stream it seeks by from the codec parameters, and passed over a
+            // video stream with no size for the audio, after which HLS gave
+            // no video and audio with no timestamps (#101).
+            if (st->codecpar->width <= 0 || st->codecpar->height <= 0) {
+                st->codecpar->width = d->v_ctx->width;
+                st->codecpar->height = d->v_ctx->height;
+            }
             d->width = d->v_ctx->width;
             d->height = d->v_ctx->height;
             d->framerate = av_q2d(st->avg_frame_rate);
