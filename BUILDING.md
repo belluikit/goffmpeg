@@ -406,7 +406,7 @@ no longer reverses on its own, which was the only check before.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds seven patches**, five to FFmpeg's Android MediaCodec decoders, one
+**It holds eight patches**, six to FFmpeg's Android MediaCodec decoders, one
 to its AudioToolbox decoder and one that adds a VideoToolbox decoder. None has been sent upstream yet, and FFmpeg
 master had none of these fixes when they were written (checked 2026-11-12 and
 2026-11-13). Each goes when the pin reaches an FFmpeg that fixes it.
@@ -434,6 +434,11 @@ master had none of these fixes when they were written (checked 2026-11-12 and
 - `0007-mediacodecdec-codec-name.patch` (#77): a `codec_name` option, so the
   bridge can open Android's software decoder, `c2.android.avc.decoder`, by
   name for a stream the hardware decoder refuses (decision B).
+- `0008-mediacodecdec-h264-colour-from-sps.patch` (#77): `h264_mediacodec`
+  takes the colour description from the SPS, as `h264` does, instead of
+  MediaCodec's guess for a stream that states none. goffmpeg used to put the
+  stream's own back from what stream probing learnt with `h264`, which the
+  Android set no longer has.
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream

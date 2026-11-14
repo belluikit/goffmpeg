@@ -65,6 +65,10 @@ static __thread const void *mediacodec_opening;
 static __thread int mediacodec_no_lookup;
 static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
     if (fmt && strcmp(fmt, "No Java virtual machine has been registered\n") == 0) level = AV_LOG_VERBOSE;
+    // Stream probing is kept off MediaCodec's H.264 decoder by a whitelist
+    // that names no codec (mediacodec_probe_opts), which avcodec_open2
+    // reports as an error.
+    if (fmt && strncmp(fmt, "Codec (", 7) == 0 && strstr(fmt, "not on whitelist")) level = AV_LOG_VERBOSE;
     if (avcl && avcl == mediacodec_opening && fmt && strncmp(fmt, "Failed to getCodecNameByType(", 29) == 0)
         mediacodec_no_lookup = 1;
     av_log_default_callback(avcl, level, fmt, vl);
@@ -164,17 +168,29 @@ static AVCodecContext *open_mediacodec_aac(AVStream *st) {
 // Pixel 9a never returned from it, and without ndk_codec it would use the Java
 // API once a VM is set. Returns the per-stream options for the call, or NULL
 // with no AAC stream; mediacodec_probe_opts_free frees them.
+//
+// It keeps H.264 off MediaCodec, in a build whose only H.264 decoder is
+// h264_mediacodec (#77): probing would open one MediaCodec decoder to learn
+// what the parser and the container already say, then playback opens a
+// second, and each costs 100 to 200 ms (measured on a OnePlus Pad 2,
+// 2026-11-14). A whitelist that names no codec makes the open fail, and
+// probing then goes on without decoding the stream, needing no pixel format.
+// The colour description, which probing used to learn from FFmpeg's h264,
+// h264_mediacodec now takes from the SPS itself (patches/0008).
 static AVDictionary **mediacodec_probe_opts(AVFormatContext *fmt) {
     AVDictionary **opts = NULL;
+    int no_h264 = !avcodec_find_decoder_by_name("h264");
     for (unsigned i = 0; i < fmt->nb_streams; i++) {
-        if (fmt->streams[i]->codecpar->codec_id != AV_CODEC_ID_AAC) continue;
+        enum AVCodecID id = fmt->streams[i]->codecpar->codec_id;
+        if (id == AV_CODEC_ID_AAC && !avcodec_find_decoder_by_name("aac_mediacodec")) continue;
+        if (id != AV_CODEC_ID_AAC && !(id == AV_CODEC_ID_H264 && no_h264)) continue;
         if (!opts) {
-            if (!avcodec_find_decoder_by_name("aac_mediacodec")) return NULL;
             opts = av_calloc(fmt->nb_streams, sizeof(*opts));
             if (!opts) return NULL;
             mediacodec_setup();
         }
-        av_dict_set(&opts[i], "ndk_codec", "1", 0);
+        if (id == AV_CODEC_ID_AAC) av_dict_set(&opts[i], "ndk_codec", "1", 0);
+        else av_dict_set(&opts[i], "codec_whitelist", "none", 0);
     }
     return opts;
 }
@@ -641,7 +657,10 @@ static int receive_video(Decoder *d) {
         return rc < 0 ? rc : 1;
     }
     int ret = receive(d->v_ctx, d->v_frame);
-    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC) {
+    // H.264 with no software decoder behind it has its colour description
+    // from the SPS (patches/0008), and probing no longer decodes it, so
+    // there is nothing to put back.
+    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC && !hw->no_fallback) {
         // MediaCodec fills in a colour description the stream may not give:
         // an untagged stream comes out tagged with the matrix MediaCodec
         // guessed, so GetYCbCr would report a guess as stated (measured on the
