@@ -289,6 +289,14 @@ streams it can decode:
   it couldn't decode (`"hevc"`). The AAC audio of an MP4 whose video the build
   can't decode still plays.
 - **No stream decodes:** the open fails with `ErrNoDecoder`, naming the codecs.
+- **Android's AAC decoder opens and returns no audio:** Android decodes AAC
+  only with its own decoder, so there is nothing to fall back to. `Next`
+  returns an error wrapping `ErrNoDecoder` that names the decoder
+  (`aac_mediacodec`). That happens when the decoder fails before its first
+  frame, reaches the end of the input without one, or is sent 64 packets
+  (about 1.5 s of audio) and returns nothing, as it does for AAC data it
+  can't decode. Elsewhere FFmpeg's `aac` refuses such data at once, as an
+  `AVError`.
 - **No demuxer recognizes the input,** or it isn't media: the open fails with
   `ErrUnrecognizedInput`, wrapping FFmpeg's `AVERROR_INVALIDDATA` as an
   `AVError`. Any other open failure wraps FFmpeg's own code too: a missing file

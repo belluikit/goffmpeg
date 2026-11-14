@@ -63,6 +63,12 @@ typedef struct {
     // video decodes in software. bridge.c owns the struct; nothing else reads
     // it.
     struct DecoderHW *hw;
+
+    // The packets sent to Android's audio decoder (#77) while it has returned
+    // no frame, or -1 once one has come out, and for every other decoder. A
+    // decoder that opens and never returns a frame ends Next with
+    // GOFFMPEG_NO_AUDIO_FRAME (#95).
+    int a_unanswered;
 } Decoder;
 
 // NOTE: decoder_purego.go mirrors this struct field-for-field in Go, and the C
@@ -204,7 +210,16 @@ int decoder_set_audio_channels(Decoder *d, int channels);
 // response, so the position is past it. A clean end has the position at the
 // size, and a demuxer that stops before trailing bytes leaves it short.
 #define GOFFMPEG_TRUNCATED 4
-int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, <0=Error
+// GOFFMPEG_NO_AUDIO_FRAME means Android's audio decoder opened and returned no
+// frame (#95): it failed before its first frame, reached the end of the input
+// without one, or was sent MEDIACODEC_AUDIO_NO_FRAME_PACKETS packets without
+// answering one. The phones carry no FFmpeg AAC decoder to fall back to (#77),
+// so the audio cannot play; decoder_audio_decoder names the decoder.
+#define GOFFMPEG_NO_AUDIO_FRAME 5
+int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, 5=no audio frame, <0=Error
+// decoder_audio_decoder names the decoder the audio stream opened with ("aac",
+// "aac_mediacodec"), or NULL with no audio stream open.
+const char *decoder_audio_decoder(Decoder *d);
 // decoder_get_rgba returns -8 in a build without video (GOFFMPEG_NO_VIDEO).
 int decoder_get_rgba(Decoder *d, uint8_t *buffer);
 int decoder_get_yuv(Decoder *d, uint8_t *y, int y_stride, uint8_t *u, uint8_t *v, int c_stride);

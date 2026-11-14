@@ -33,6 +33,9 @@ func TestNextResultClassifies(t *testing.T) {
 		// The bare AVERROR arm: purego against a libgoffmpeg older than the
 		// bridge fix returns the raw code, and it must classify the same.
 		{"raw EAGAIN from an older bridge", eagain, MediaTypeNone, ErrAgain},
+		// Android's audio decoder returning no frame (#95) is an error, not
+		// a media type 5.
+		{"audio decoder returned no frame", goffmpegNoAudioFrame, MediaTypeNone, ErrNoDecoder},
 	}
 
 	for _, tc := range cases {
