@@ -247,6 +247,68 @@ func TestAACSeek(t *testing.T) {
 	}
 }
 
+// A seek back to the start after the end of each AAC clip decodes the clip
+// again, as a player that loops does (#103). At the end of the file the
+// bridge drains the decoder with an empty packet. Apple's aac_at kept that
+// end-of-stream state through the flush a seek does, and gave no audio after
+// it (patches/0010): a looping player on an iPad went silent, and its video,
+// paced by the audio clock, played 1.6 frames a second. The second pass has
+// the first's samples, give or take the priming a seek lets out (TestAACSeek).
+func TestAACSeekAfterEnd(t *testing.T) {
+	paths := aacTestClips(t)
+	for _, c := range aacClips {
+		if !slices.Contains(paths, c.path) {
+			continue
+		}
+		dec, err := Open(c.path)
+		if err != nil {
+			t.Fatalf("%s: Open: %v", c.path, err)
+		}
+		// pass decodes to the end and returns the samples per channel, the
+		// first audio frame's position, and the PCM.
+		pass := func() (int, float64, []byte) {
+			var pcm []byte
+			first := -1.0
+			for {
+				mt, err := dec.Next()
+				if err != nil {
+					t.Fatalf("%s: Next: %v", c.path, err)
+				}
+				if mt == MediaTypeNone {
+					break
+				}
+				if mt != MediaTypeAudio {
+					continue
+				}
+				if first < 0 {
+					first = dec.Position()
+				}
+				b, err := dec.GetAudio()
+				if err != nil {
+					t.Fatalf("%s: GetAudio: %v", c.path, err)
+				}
+				pcm = append(pcm, b...)
+			}
+			if ch := dec.AudioInfo().Channels; ch > 0 {
+				return len(pcm) / 2 / ch, first, pcm
+			}
+			return 0, first, pcm
+		}
+		n1, start, _ := pass()
+		if err := dec.Seek(start); err != nil {
+			t.Fatalf("%s: Seek(%v) after the end: %v", c.path, start, err)
+		}
+		n2, first, pcm := pass()
+		dec.Close()
+		t.Logf("%s: %d samples, then %d after Seek(%.3f) at the end (first frame at %.3f s)", c.path, n1, n2, start, first)
+		if d := n2 - n1; first < 0 || d < -1024 || d > 4224 {
+			t.Errorf("%s: %d samples after Seek(%.3f) at the end, %d before it", c.path, n2, start, n1)
+		} else if r := rms(pcm); r < 100 {
+			t.Errorf("%s: the audio after Seek(%.3f) at the end is silence (RMS %.1f)", c.path, start, r)
+		}
+	}
+}
+
 // An AAC stream that opens and never decodes ends in an error, not in silence
 // (#95). testdata/aac/zeroed.m4a is lc.m4a with every byte of its audio data
 // (the mdat box) set to zero, so the header describes AAC-LC stereo and no
