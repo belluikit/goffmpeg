@@ -206,7 +206,15 @@ static void mediacodec_probe_opts_free(AVDictionary **opts, unsigned n) {
 //    VideoToolbox will not start, FFmpeg asks get_format again without it and
 //    the decoder carries on in software. Its frames are CVPixelBuffers, copied
 //    to nv12 in system memory by av_hwframe_transfer_data.
-enum { HW_NONE, HW_MEDIACODEC, HW_VIDEOTOOLBOX };
+//
+// And one with nothing to fall back to: on iOS, H.264 decodes only through
+// Apple's decoder (#77), h264_videotoolbox, a decoder of its own (an FFmpeg
+// patch, patches/0006), which the build has in place of the software h264.
+// It is opened by name and its frames are nv12 in system memory, like
+// MediaCodec's. Its packets are counted, not kept: a failure before its first
+// frame, or HW_PENDING_MAX packets without one, ends decoder_next with
+// GOFFMPEG_NO_VIDEO_FRAME (#77 decision A).
+enum { HW_NONE, HW_MEDIACODEC, HW_VIDEOTOOLBOX, HW_PLATFORM };
 // The most packets kept for a fallback, and the most MediaCodec is sent
 // without giving a frame before it is replaced (#81). A working MediaCodec
 // gives its first frame within 4 to 16 packets (OnePlus Pad 2, H.264 up to
@@ -389,6 +397,30 @@ static int vt_hardware(enum AVCodecID id) {
     return supported && supported(type);
 }
 
+// open_platform_h264 opens h264_videotoolbox, Apple's decoder as an FFmpeg
+// decoder of its own (#77), for a build with no software h264: the iOS media
+// set. It refuses what VideoToolbox doesn't decode, such as High 4:4:4, at
+// the open, and the stream is then left out (#41).
+static AVCodecContext *open_platform_h264(Decoder *d, AVStream *st) {
+    const AVCodec *codec = avcodec_find_decoder_by_name("h264_videotoolbox");
+    if (!codec) return NULL;
+    struct DecoderHW *hw = av_mallocz(sizeof(*hw));
+    AVCodecContext *ctx = hw ? avcodec_alloc_context3(codec) : NULL;
+    if (!ctx) {
+        av_free(hw);
+        return NULL;
+    }
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    if (avcodec_open2(ctx, codec, NULL) < 0) {
+        avcodec_free_context(&ctx);
+        av_free(hw);
+        return NULL;
+    }
+    hw->kind = HW_PLATFORM;
+    d->hw = hw;
+    return ctx;
+}
+
 static AVCodecContext *open_videotoolbox(Decoder *d, AVStream *st) {
     enum AVCodecID id = st->codecpar->codec_id;
     if ((id == AV_CODEC_ID_VP9 || id == AV_CODEC_ID_AV1) && !vt_hardware(id)) return NULL;
@@ -441,9 +473,16 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
             ctx = open_mediacodec(d, st);
 #endif
 #ifdef __APPLE__
-        ctx = open_videotoolbox(d, st);
+        if (id != AV_CODEC_ID_H264 || avcodec_find_decoder_by_name("h264"))
+            ctx = open_videotoolbox(d, st);
 #endif
     }
+#ifdef __APPLE__
+    // With no software h264 (the iOS media set), H.264 has only Apple's
+    // decoder, whatever GOFFMPEG_HWDECODE says.
+    if (!ctx && id == AV_CODEC_ID_H264 && !avcodec_find_decoder_by_name("h264"))
+        return open_platform_h264(d, st);
+#endif
     return ctx ? ctx : open_software_video(st);
 }
 
@@ -469,6 +508,10 @@ static int hw_fragile(Decoder *d) {
 
 static void hw_keep(Decoder *d, const AVPacket *pkt) {
     struct DecoderHW *hw = d->hw;
+    if (hw && hw->kind == HW_PLATFORM) {
+        if (!hw->confirmed) hw->npending++;
+        return;
+    }
     if (!hw_fragile(d)) return;
     if (hw->npending < HW_PENDING_MAX) {
         AVPacket *p = av_packet_clone(pkt);
@@ -525,6 +568,19 @@ static int hw_silent(const struct DecoderHW *hw, int ret) {
 // "no frame yet" so decoder_next goes on to the kept packets.
 static int receive_video(Decoder *d) {
     struct DecoderHW *hw = d->hw;
+    if (hw && hw->kind == HW_PLATFORM) {
+        int ret = receive(d->v_ctx, d->v_frame);
+        if (ret == 1) {
+            hw->confirmed = 1;
+            return 1;
+        }
+        if (!hw->confirmed && ((ret < 0 && ret != AVERROR_EOF) || hw_silent(hw, ret))) {
+            av_log(d->v_ctx, AV_LOG_ERROR, "%s returned no frame from %d packets (%s)\n", d->v_ctx->codec->name,
+                   hw->npending, ret < 0 ? av_err2str(ret) : "no error");
+            return GOFFMPEG_NO_VIDEO_FRAME;
+        }
+        return ret;
+    }
     if (hw && hw->kind == HW_VIDEOTOOLBOX) {
         int ret = receive(d->v_ctx, hw->frame);
         if (ret < 0 && ret != AVERROR_EOF && hw_fragile(d) && hw_fallback(d) == 0) return 0;
@@ -945,6 +1001,7 @@ int decoder_next(Decoder *d) {
                 frame_position(d, d->v_frame, d->v_stream_idx);
                 return 1;
             }
+            if (ret == GOFFMPEG_NO_VIDEO_FRAME) return ret;
             if (ret < 0 && ret != AVERROR_EOF) return ret;
             v_done = ret == AVERROR_EOF;
         }

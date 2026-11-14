@@ -36,6 +36,8 @@ func TestNextResultClassifies(t *testing.T) {
 		// Android's audio decoder returning no frame (#95) is an error, not
 		// a media type 5.
 		{"audio decoder returned no frame", goffmpegNoAudioFrame, MediaTypeNone, ErrNoDecoder},
+		// And Apple's H.264 decoder on iOS (#77).
+		{"video decoder returned no frame", goffmpegNoVideoFrame, MediaTypeNone, ErrNoDecoder},
 	}
 
 	for _, tc := range cases {

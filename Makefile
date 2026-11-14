@@ -197,7 +197,9 @@ SET_HWACCELS =
 SET_INDEVS   =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
-	SET_DECODERS += h264
+	# iOS decodes H.264 with Apple's own decoder, h264_videotoolbox, below
+	# (#77).
+	SET_DECODERS += $(if $(filter ios_% iossimulator_%,$(TARGET)),,h264)
 	SET_PARSERS  += h264
 	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
 	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3
@@ -239,9 +241,14 @@ ifeq ($(SET)$(filter darwin_% linux_% windows_%,$(TARGET)),media$(TARGET))
 	SET_INDEVS   += $(if $(filter darwin_%,$(TARGET)),avfoundation,$(if $(filter linux_%,$(TARGET)),v4l2,dshow))
 endif
 # VideoToolbox decodes through FFmpeg's own h264, vp9 and av1 decoders,
-# which its hwaccels select.
+# which its hwaccels select. On iOS, H.264 instead has h264_videotoolbox, a
+# decoder of its own that needs no software h264 (patches/0006, #77), so the
+# phones carry none; its hwaccel would select h264 back in.
 ifeq ($(SET)$(filter darwin_% ios_% iossimulator_%,$(TARGET)),media$(TARGET))
-	SET_HWACCELS += h264_videotoolbox vp9_videotoolbox av1_videotoolbox
+	SET_HWACCELS += $(if $(filter ios_% iossimulator_%,$(TARGET)),,h264_videotoolbox) vp9_videotoolbox av1_videotoolbox
+endif
+ifeq ($(SET)$(filter ios_% iossimulator_%,$(TARGET)),media$(TARGET))
+	SET_DECODERS += h264_videotoolbox
 endif
 # MediaCodec is a decoder of its own, not a hwaccel of h264 (goffmpeg-libs#21,
 # #65). It selects the h264_mp4toannexb filter and the h264 parser, which the

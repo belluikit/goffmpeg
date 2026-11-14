@@ -464,7 +464,7 @@ func (d *puregoDecoder) audioDecoder() string {
 
 func (d *puregoDecoder) Next() (MediaType, error) {
 	mt, err := d.interrupted.nextResult(d.bridgeNext())
-	return nameAudioDecoder(mt, err, d.audioDecoder)
+	return nameDecoder(mt, err, d.audioDecoder, d.videoDecoder)
 }
 
 func (d *puregoDecoder) bridgeNext() int { return int(decoder_next(&d.d)) }

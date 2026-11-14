@@ -346,8 +346,8 @@ func rgbaResult(rc int, info VideoInfo) error {
 // and VideoInfo or AudioInfo names the other in MissingDecoder.
 //
 // Next returns an error wrapping it too, on Android and iOS, when the
-// platform's audio decoder opened and then returned no frame (#95), and names
-// that decoder.
+// platform's own decoder opened and then returned no frame (#95, #77): their
+// AAC decoders, and Apple's H.264 decoder on iOS. It names that decoder.
 var ErrNoDecoder = errors.New("goffmpeg: this build has no decoder for any stream of the input")
 
 // ErrUnrecognizedInput reports an input no demuxer in this build recognizes:
@@ -446,30 +446,39 @@ const goffmpegTruncated = 4
 // goffmpegNoAudioFrame mirrors GOFFMPEG_NO_AUDIO_FRAME in bridge.h.
 const goffmpegNoAudioFrame = 5
 
-// audioNoFrameError is what Next returns when the phone's own audio decoder,
-// Android's or Apple's, opened and returned no frame (#95): it failed before its first frame, reached the
-// end of the input without one, or took many packets and answered none, as
-// it does for data it cannot decode. It wraps ErrNoDecoder, because the audio
-// cannot play: the phones carry no FFmpeg AAC decoder to try instead (#77).
-// decoder names it ("aac_mediacodec", "aac_at"), empty when a backend cannot
-// say.
-type audioNoFrameError struct{ decoder string }
+// goffmpegNoVideoFrame mirrors GOFFMPEG_NO_VIDEO_FRAME in bridge.h.
+const goffmpegNoVideoFrame = 6
 
-func (e *audioNoFrameError) Error() string {
+// noFrameError is what Next returns when the phone's own decoder opened and
+// returned no frame (#95, #77 decision A): it failed before its first frame,
+// reached the end of the input without one, or took many packets and
+// answered none, as it does for data it cannot decode. For audio that is
+// Android's or Apple's AAC decoder, for video Apple's H.264 decoder on iOS.
+// It wraps ErrNoDecoder, because the stream cannot play: the phones carry no
+// FFmpeg decoder to try instead (#77). media is "audio" or "video"; decoder
+// names it ("aac_mediacodec", "aac_at", "h264_videotoolbox"), empty when a
+// backend cannot say.
+type noFrameError struct{ media, decoder string }
+
+func (e *noFrameError) Error() string {
 	d := e.decoder
 	if d == "" {
-		d = "the audio decoder"
+		d = "the " + e.media + " decoder"
 	}
-	return fmt.Sprintf("goffmpeg: audio: %s opened and returned no frame, and this build has no other decoder for it", d)
+	return fmt.Sprintf("goffmpeg: %s: %s opened and returned no frame, and this build has no other decoder for it", e.media, d)
 }
 
-func (e *audioNoFrameError) Unwrap() error { return ErrNoDecoder }
+func (e *noFrameError) Unwrap() error { return ErrNoDecoder }
 
-// nameAudioDecoder fills in the decoder an audioNoFrameError is about, which
-// nextResult cannot see.
-func nameAudioDecoder(mt MediaType, err error, name func() string) (MediaType, error) {
-	if e, ok := err.(*audioNoFrameError); ok && e.decoder == "" {
-		e.decoder = name()
+// nameDecoder fills in the decoder a noFrameError is about, which nextResult
+// cannot see.
+func nameDecoder(mt MediaType, err error, audio, video func() string) (MediaType, error) {
+	if e, ok := err.(*noFrameError); ok && e.decoder == "" {
+		if e.media == "video" {
+			e.decoder = video()
+		} else {
+			e.decoder = audio()
+		}
 	}
 	return mt, err
 }
@@ -500,7 +509,9 @@ func nextResult(res int) (MediaType, error) {
 	case res == goffmpegTruncated:
 		return MediaTypeNone, ErrStreamTruncated
 	case res == goffmpegNoAudioFrame:
-		return MediaTypeNone, &audioNoFrameError{}
+		return MediaTypeNone, &noFrameError{media: "audio"}
+	case res == goffmpegNoVideoFrame:
+		return MediaTypeNone, &noFrameError{media: "video"}
 	case res < 0:
 		return MediaTypeNone, AVError(res)
 	default:
