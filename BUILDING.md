@@ -406,10 +406,10 @@ no longer reverses on its own, which was the only check before.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds nine patches**, seven to FFmpeg's Android MediaCodec decoders, one
+**It holds ten patches**, seven to FFmpeg's Android MediaCodec decoders, two
 to its AudioToolbox decoder and one that adds a VideoToolbox decoder. None has been sent upstream yet, and FFmpeg
-master had none of these fixes when they were written (checked 2026-11-12 and
-2026-11-13). Each goes when the pin reaches an FFmpeg that fixes it.
+master had none of these fixes when they were written (checked 2026-11-12,
+2026-11-13 and 2026-11-14). Each goes when the pin reaches an FFmpeg that fixes it.
 
 - `0001-mediacodecdec-stall-before-first-frame.patch` (#88): a MediaCodec that,
   before its first frame, takes no input and returns no frame for 2 s makes
@@ -444,6 +444,10 @@ master had none of these fixes when they were written (checked 2026-11-12 and
   `h264_mediacodec` makes MediaCodec again when a new SPS changes the
   picture's size, after draining the old size's frames. MediaTek's decoder gave
   no frame after a resolution change.
+- `0010-audiotoolboxdec-flush-clears-eof.patch` (#103): `aac_at` decodes
+  again after a seek that follows the end of the stream. Its flush kept the
+  end-of-stream flag, so a player that looped or seeked back after the end got
+  no more audio, and one that paces video by the audio clock stalled.
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream

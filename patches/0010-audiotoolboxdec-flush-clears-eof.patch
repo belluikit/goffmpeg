@@ -1,0 +1,31 @@
+avcodec/audiotoolboxdec: decode again after a flush that follows the end
+
+goffmpeg #103. Upstream: not submitted yet.
+
+An empty packet, the end of the stream, sets eof, and from then on the
+input callback hands AudioToolbox no packets. Flushing reset the
+converter and dropped the held packets, but kept eof, so a decoder that
+had been drained gave no audio after avcodec_flush_buffers and a seek.
+A player that loops, or seeks back after the end, went silent, and one
+that paces video by the audio clock stalled with it.
+
+Measured on macOS 27: decoding an AAC-LC M4A to the end with the drain,
+flushing, seeking to 0 and decoding again gave 0 samples the second
+time with aac_at and the full count with FFmpeg's aac. On an iPad (10th
+generation), a 4 s clip looping in a player rendered 1.6 frames a
+second instead of 24. The flush now clears eof. With it, the second
+pass gives the full count with aac_at for AAC-LC, HE-AAC and HE-AACv2
+M4A and AAC-LC ADTS.
+
+diff --git a/libavcodec/audiotoolboxdec.c b/libavcodec/audiotoolboxdec.c
+index 0e90d64b74..be2f788d5a 100644
+--- a/libavcodec/audiotoolboxdec.c
++++ b/libavcodec/audiotoolboxdec.c
+@@ -687,6 +687,7 @@ static av_cold void ffat_decode_flush(AVCodecContext *avctx)
+     AudioConverterReset(at->converter);
+     av_packet_unref(&at->new_in_pkt);
+     av_packet_unref(&at->in_pkt);
++    at->eof = 0;
+ }
+ 
+ static av_cold int ffat_close_decoder(AVCodecContext *avctx)
