@@ -1,4 +1,4 @@
-//go:build cgo && !goffmpeg_novideo
+//go:build cgo
 
 package goffmpeg
 
@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +19,8 @@ import (
 
 // aacClips are the AAC streams apps meet, each profile in each container, with
 // what FFmpeg's aac decoder makes of them on macOS: the rate, the channel
-// count and the length in samples per channel. Android decodes AAC with its
-// own decoder (#77), and must make the same of them.
+// count and the length in samples per channel. Android and iOS decode AAC
+// with their own decoders (#77), and must make the same of them.
 //
 // testdata/aac was encoded from one 3 s, 44.1 kHz stereo source whose two
 // channels differ and carry tones above 11 kHz, so a decoder that drops
@@ -42,6 +43,38 @@ var aacClips = []struct {
 	{"testdata/sample_51.m4a", "AAC-LC 5.1, M4A", 44100, 6, 88200, false},
 	{"testdata/sample.mp4", "AAC-LC mono, MP4 with H.264", 44100, 1, 176400, false},
 	{"testdata/hls/stream.m3u8", "AAC-LC mono, HLS", 44100, 1, 90112, false},
+}
+
+// aacDecoder is the decoder each platform decodes AAC with: Android's and
+// Apple's own on the phones (#77), FFmpeg's on desktop.
+func aacDecoder() string {
+	switch runtime.GOOS {
+	case "android":
+		return "aac_mediacodec"
+	case "ios":
+		return "aac_at"
+	}
+	return "aac"
+}
+
+// aacTestClips are the aacClips the loaded set reads: every one in the media
+// set; in the audio set, which has AAC in M4A, MP4 and ADTS but no HLS (#77
+// decision C), all but the HLS one. It skips the test on an audio set that
+// predates AAC, as the published goffmpeg-libs' does until their next release.
+func aacTestClips(t *testing.T) []string {
+	t.Helper()
+	var paths []string
+	for _, c := range aacClips {
+		paths = append(paths, c.path)
+	}
+	if testCodecSet == "media" {
+		return paths
+	}
+	_, demuxers := builtComponents()
+	if !slices.ContainsFunc(demuxers, func(d string) bool { return strings.HasPrefix(d, "mov,") }) {
+		t.Skip("the loaded audio set predates AAC (#77)")
+	}
+	return slices.DeleteFunc(paths, func(p string) bool { return strings.HasSuffix(p, ".m3u8") })
 }
 
 // decodeAudio opens path and decodes its audio from seek seconds (0: from
@@ -128,22 +161,21 @@ func rms(pcm []byte) float64 {
 }
 
 // Each AAC clip decodes to the rate, channels and length FFmpeg's aac decoder
-// gives it, and a stereo clip stays stereo. On Android that is Android's own
-// decoder (#77), so this holds it to FFmpeg's, through the container's
-// padding (patches/0003), ADTS and HLS (patches/0002), HE-AAC's high band and
-// HE-AACv2's parametric stereo. With GOFFMPEG_TEST_AAC_DUMP set to a
+// gives it, and a stereo clip stays stereo. On the phones that is their own
+// decoder (#77), so this holds it to FFmpeg's: Android's through the
+// container's padding (patches/0003), ADTS and HLS (patches/0002), Apple's
+// through HE-AAC's high band and HE-AACv2's parametric stereo, signalled or
+// not (patches/0005), and both through those. With GOFFMPEG_TEST_AAC_DUMP set to a
 // directory, each clip's PCM is written there as well, for comparing the two
 // decoders' samples, which this cannot do on a phone.
 func TestAACClips(t *testing.T) {
-	if testCodecSet != "media" {
-		t.Skip("AAC is in the media set")
-	}
-	want := "aac"
-	if runtime.GOOS == "android" {
-		want = "aac_mediacodec"
-	}
+	paths := aacTestClips(t)
+	want := aacDecoder()
 	dump := os.Getenv("GOFFMPEG_TEST_AAC_DUMP")
 	for _, c := range aacClips {
+		if !slices.Contains(paths, c.path) {
+			continue
+		}
 		info, decoder, pcm, _, opened := decodeAudio(t, c.path, 0)
 		samples := 0
 		if info.Channels > 0 {
@@ -183,11 +215,12 @@ func TestAACClips(t *testing.T) {
 // FFmpeg's aac on macOS, 2112 samples for AAC-LC and 4224 for HE-AAC, and
 // none from ADTS, which says nothing.
 func TestAACSeek(t *testing.T) {
-	if testCodecSet != "media" {
-		t.Skip("AAC is in the media set")
-	}
+	paths := aacTestClips(t)
 	const into = 1.0 // seconds after the clip's first position
 	for _, c := range aacClips {
+		if !slices.Contains(paths, c.path) {
+			continue
+		}
 		_, _, _, start, _ := decodeAudio(t, c.path, 0)
 		seek := start + into
 		info, _, pcm, first, _ := decodeAudio(t, c.path, seek)
@@ -219,15 +252,14 @@ func TestAACSeek(t *testing.T) {
 // (the mdat box) set to zero, so the header describes AAC-LC stereo and no
 // packet decodes; zeroed_short.m4a is its first 0.5 s (ffmpeg -t 0.5 -c copy),
 // 24 packets. FFmpeg's aac refuses the first packet as invalid data. Android's
-// decoder takes every packet and returns nothing, so the bridge gives up after
+// and Apple's decoders take every packet and return nothing, so the bridge
+// gives up after
 // MEDIACODEC_AUDIO_NO_FRAME_PACKETS packets (zeroed.m4a's 132), or at the end
 // of the input (zeroed_short.m4a's 24), with an error wrapping ErrNoDecoder
 // that names the decoder: the phones have no other AAC decoder (#77). Before
 // #95 the audio there ended cleanly, having played nothing.
 func TestAACNoFrame(t *testing.T) {
-	if testCodecSet != "media" {
-		t.Skip("AAC is in the media set")
-	}
+	aacTestClips(t)
 	for _, path := range []string{"testdata/aac/zeroed.m4a", "testdata/aac/zeroed_short.m4a"} {
 		start := time.Now()
 		dec, err := Open(path)
@@ -258,9 +290,9 @@ func TestAACNoFrame(t *testing.T) {
 			t.Errorf("%s: Next reached the end with no error, and no audio", path)
 			continue
 		}
-		if runtime.GOOS == "android" {
-			if !errors.Is(err, ErrNoDecoder) || !strings.Contains(err.Error(), "aac_mediacodec") {
-				t.Errorf("%s: Next: %v; want an error wrapping ErrNoDecoder that names aac_mediacodec", path, err)
+		if want := aacDecoder(); want != "aac" {
+			if decoder != want || !errors.Is(err, ErrNoDecoder) || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: %s, Next: %v; want %s, and an error wrapping ErrNoDecoder that names it", path, decoder, err, want)
 			}
 		} else if !errors.Is(err, avErrorInvalidData) {
 			t.Errorf("%s: Next: %v; want FFmpeg's aac refusing the data as invalid", path, err)

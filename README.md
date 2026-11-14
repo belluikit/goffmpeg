@@ -211,6 +211,15 @@ FFmpeg's stream probing opens one MediaCodec decoder to learn the stream's
 real format and playback opens a second. Three FFmpeg patches make it work
 (`patches/0002`–`0004`, see BUILDING.md).
 
+On iOS, AAC decodes with Apple's own decoder, through FFmpeg's `aac_at`
+(AudioToolbox), and the iOS builds carry no FFmpeg AAC decoder either (#77).
+FFmpeg's `aac_at` decoded only HE-AAC's core, at half the rate, and HE-AACv2 in
+mono; `patches/0005` makes it decode every layer, signalled or implicit, so the
+clips above come out at the rate, channel count and length FFmpeg's own
+decoder gives them. One case differs: AAC-LC at 24 kHz or below that says
+nothing about HE-AAC comes out at twice its rate, as from any decoder that
+assumes HE-AAC there, where FFmpeg's decoder keeps the rate.
+
 On desktop, video decodes in software unless you ask. The `GOFFMPEG_HWDECODE`
 environment variable, read when each input is opened, controls this:
 
@@ -258,8 +267,8 @@ goffmpeg's FFmpeg comes in two codec sets (#41):
 | Set | Plays | Linked by |
 |---|---|---|
 | **media**, desktop (macOS, Linux, Windows) | every format FFmpeg decodes; webcam capture | default |
-| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`), WebM, Ogg and HLS, with H.264, VP9 and AV1 video and AAC and Opus audio (AAC on Android through Android's decoder) | default |
-| **audio**, every platform | MP3, WAV and Opus (Ogg, `.opus`) | `-tags goffmpeg_novideo` |
+| **media**, phones (Android, iOS) | MP3, WAV, MP4 (`.mp4`, `.m4a`, `.mov`), WebM, Ogg and HLS, with H.264, VP9 and AV1 video and AAC and Opus audio (AAC through Android's and Apple's own decoders) | default |
+| **audio**, every platform | MP3, WAV, Opus (Ogg, `.opus`) and AAC (MP4 and `.m4a`, ADTS `.aac`); on the phones AAC through their own decoders | `-tags goffmpeg_novideo` |
 
 VP9, AV1 and Opus are there for apps that move their content to royalty-free
 formats (#78). AV1 decodes in software through dav1d, built into libavcodec on
@@ -271,11 +280,12 @@ exact lists are in [BUILDING.md](BUILDING.md#what-is-in-the-build).
 ## Audio only
 
 `-tags goffmpeg_novideo` builds the cgo backend against the audio set: MP3,
-WAV and Opus, with no libswscale and no libavdevice, on every platform, so an
-app ships 2.0 MB of FFmpeg where the phone media set is 6.6 MB (android_arm64). No video frame arrives,
+WAV, Opus and AAC, with no libswscale and no libavdevice, on every platform, so an
+app ships 2.2 MB of FFmpeg where the phone media set is 6.5 MB (android_arm64). No video frame arrives,
 `GetRGBA` returns `ErrVideoNotBuilt`, and there's no capture: `OpenDevice`
-says the build has no libavdevice. An MP4 fails to open with
-`ErrUnrecognizedInput`. The tag doesn't change the purego backend, which loads
+says the build has no libavdevice. An MP4 opens with its AAC, and its video is
+left out and named in `VideoInfo().MissingDecoder` (#77). HLS fails to open
+with `ErrUnrecognizedInput`. The tag doesn't change the purego backend, which loads
 a prebuilt `libgoffmpeg` that links the media set.
 
 ## When a build can't decode something
@@ -289,14 +299,14 @@ streams it can decode:
   it couldn't decode (`"hevc"`). The AAC audio of an MP4 whose video the build
   can't decode still plays.
 - **No stream decodes:** the open fails with `ErrNoDecoder`, naming the codecs.
-- **Android's AAC decoder opens and returns no audio:** Android decodes AAC
-  only with its own decoder, so there is nothing to fall back to. `Next`
-  returns an error wrapping `ErrNoDecoder` that names the decoder
-  (`aac_mediacodec`). That happens when the decoder fails before its first
-  frame, reaches the end of the input without one, or is sent 64 packets
-  (about 1.5 s of audio) and returns nothing, as it does for AAC data it
-  can't decode. Elsewhere FFmpeg's `aac` refuses such data at once, as an
-  `AVError`.
+- **The phone's AAC decoder opens and returns no audio:** Android and iOS
+  decode AAC only with their own decoders, so there is nothing to fall back
+  to. `Next` returns an error wrapping `ErrNoDecoder` that names the decoder
+  (`aac_mediacodec`, `aac_at`). That happens when the decoder fails before
+  its first frame, reaches the end of the input without one, or is sent 64
+  packets (about 1.5 s of audio) and returns nothing, as both do for AAC data
+  they can't decode. On desktop FFmpeg's `aac` refuses such data at once, as
+  an `AVError`.
 - **No demuxer recognizes the input,** or it isn't media: the open fails with
   `ErrUnrecognizedInput`, wrapping FFmpeg's `AVERROR_INVALIDDATA` as an
   `AVError`. Any other open failure wraps FFmpeg's own code too: a missing file

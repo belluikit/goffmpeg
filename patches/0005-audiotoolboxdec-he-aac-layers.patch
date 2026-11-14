@@ -1,0 +1,202 @@
+avcodec/audiotoolboxdec: decode HE-AAC and HE-AACv2 in full
+
+goffmpeg #77. Upstream: not submitted yet.
+
+aac_at decoded only the AAC core of HE-AAC: half the rate (22.05 kHz
+for a 44.1 kHz stream), and HE-AACv2 in mono, because it took the input
+format from kAudioFormatProperty_FormatInfo, which describes the core.
+Measured on macOS 27 and an iPad (10th generation), against FFmpeg's aac:
+an HE-AAC M4A gave 22050 Hz and half the samples, an HE-AACv2 M4A 22050
+Hz mono and a quarter of them.
+
+The input format is now the first, richest, entry of
+kAudioFormatProperty_FormatList for the configuration, which lists every
+layer it describes. Its specifier is an AudioFormatInfo (the core's
+description and the magic cookie), not the cookie alone, which it
+rejects with -9405.
+
+That covers explicit signalling. FFmpeg's aac also finds SBR and PS
+where they are implicit: SBR in a core at 24 kHz or below with no
+signalling at all, which is all ADTS can say, and PS in any mono
+HE-AAC. AudioToolbox decodes only the layers a configuration names, so
+those configurations are rewritten as hierarchical signalling (object
+type 5, or 29 for mono, with the extension's rate) before the format is
+read: a 2-byte AAC-LC configuration at 24 kHz or below, backward-
+compatible signalling of mono HE-AAC with no PS flag, and hierarchical
+mono HE-AAC. Explicit signalling that rules SBR or PS out is kept.
+
+AAC without a configuration, as from ADTS, now waits for the one
+aac_adtstoasc gives the first packet before creating the converter. It
+used to create it at init from the stream's rate and channels, which
+for HE-AAC are now the full rate the probe found, and an AAC-LC
+converter at that rate rejects every packet ('bada').
+
+Measured on macOS 27 (arm64), against FFmpeg's aac, for HE-AAC and
+HE-AACv2 in M4A and ADTS and mono HE-AAC in both: the same rate,
+channels and sample count, and 73 to 79 dB SNR once aligned. AAC-LC,
+5.1, MP4 and HLS are unchanged (72 to 79 dB). aac_at's HE-AAC output
+starts 962 samples earlier than aac's, and lines up with the AAC-LC
+encoding of the same source at the container's timestamps. On an iPad
+(10th generation), through goffmpeg, the same clips give the same rate,
+channels and length as aac on macOS, and seek alike. AAC-LC at
+24 kHz or below with no signalling now comes out at twice its rate
+(and mono as stereo), as it does from HE-AAC decoders that assume
+implicit SBR; aac keeps its own rate there.
+
+diff --git a/libavcodec/audiotoolboxdec.c b/libavcodec/audiotoolboxdec.c
+index 08203c5310..0e90d64b74 100644
+--- a/libavcodec/audiotoolboxdec.c
++++ b/libavcodec/audiotoolboxdec.c
+@@ -29,7 +29,9 @@
+ #include "bytestream.h"
+ #include "codec_internal.h"
+ #include "decode.h"
++#include "get_bits.h"
+ #include "mpegaudiodecheader.h"
++#include "put_bits.h"
+ #include "libavutil/avassert.h"
+ #include "libavutil/channel_layout.h"
+ #include "libavutil/mem.h"
+@@ -303,6 +305,78 @@ static int ffat_set_extradata(AVCodecContext *avctx)
+     return 0;
+ }
+ 
++/* An AudioSpecificConfig names HE-AAC's SBR and HE-AACv2's PS only when it
++ * signals them explicitly, and AudioToolbox decodes only the layers it names.
++ * FFmpeg's aac decoder also finds them where they can be implicit: SBR in a
++ * core at 24 kHz or below with no signalling at all (ADTS can't signal it),
++ * and PS in any mono HE-AAC that doesn't rule it out. So name them, as
++ * hierarchical signalling: object type 5 (SBR) or 29 (PS), the core's rate
++ * index and channels, the extension's rate index, the core's object type 2
++ * and its GASpecificConfig. Only a plain AAC-LC configuration (3
++ * GASpecificConfig bits, nothing after) is rewritten, and explicit
++ * signalling that rules SBR or PS out is kept. Returns 1 when extradata was
++ * rewritten, 0 when not, or a negative error. */
++static int ffat_signal_implicit_aac(ATDecodeContext *at)
++{
++    GetBitContext gb;
++    PutBitContext pb;
++    uint8_t asc[4];
++    int aot, freq, chan, ga, ext_freq = -1, ps = 0;
++
++    if (at->extradata_size < 2 ||
++        init_get_bits8(&gb, at->extradata, at->extradata_size) < 0)
++        return 0;
++    aot  = get_bits(&gb, 5);
++    freq = get_bits(&gb, 4);
++    chan = get_bits(&gb, 4);
++    if (aot == 5 && chan == 1 && freq < 15) {
++        /* Hierarchical mono HE-AAC: the same with object type 29. */
++        at->extradata[0] = (at->extradata[0] & 0x07) | (29 << 3);
++        return 1;
++    }
++    if (aot != 2 || freq > 12 || chan < 1 || chan > 2)
++        return 0;
++    ga = get_bits(&gb, 3);
++    if (ga & 3) /* dependsOnCoreCoder or extensionFlag: not plain AAC-LC */
++        return 0;
++    if (get_bits_left(&gb) >= 16 && show_bits(&gb, 11) == 0x2b7) {
++        /* Backward-compatible explicit signalling. */
++        skip_bits(&gb, 11);
++        if (get_bits(&gb, 5) != 5 || !get_bits1(&gb))
++            return 0; /* says there is no SBR */
++        ext_freq = get_bits(&gb, 4);
++        if (get_bits_left(&gb) >= 12 && show_bits(&gb, 11) == 0x548) {
++            skip_bits(&gb, 11);
++            ps = get_bits1(&gb);
++            if (!ps)
++                return 0; /* says there is no PS */
++        }
++        if (chan != 1 || ps)
++            return 0; /* AudioToolbox reads this signalling itself */
++    } else if (at->extradata_size == 2 && freq >= 6 && freq <= 11) {
++        ext_freq = freq - 3; /* implicit SBR doubles the rate */
++    } else {
++        return 0;
++    }
++
++    init_put_bits(&pb, asc, sizeof(asc));
++    put_bits(&pb, 5, chan == 1 ? 29 : 5);
++    put_bits(&pb, 4, freq);
++    put_bits(&pb, 4, chan);
++    put_bits(&pb, 4, ext_freq);
++    put_bits(&pb, 5, 2);
++    put_bits(&pb, 3, ga);
++    flush_put_bits(&pb);
++    av_free(at->extradata);
++    if (!(at->extradata = av_mallocz(sizeof(asc) + AV_INPUT_BUFFER_PADDING_SIZE))) {
++        at->extradata_size = 0;
++        return AVERROR(ENOMEM);
++    }
++    memcpy(at->extradata, asc, sizeof(asc));
++    at->extradata_size = sizeof(asc);
++    return 1;
++}
++
+ static av_cold int ffat_create_decoder(AVCodecContext *avctx,
+                                        const AVPacket *pkt)
+ {
+@@ -326,6 +400,13 @@ static av_cold int ffat_create_decoder(AVCodecContext *avctx,
+ 
+     avctx->sample_fmt = sample_fmt;
+ 
++    if (avctx->codec_id == AV_CODEC_ID_AAC) {
++        int ret = ffat_signal_implicit_aac(at);
++        if (ret < 0)
++            return ret;
++        if (ret)
++            av_log(avctx, AV_LOG_DEBUG, "AAC configuration rewritten to signal implicit SBR or PS\n");
++    }
+     if (ffat_usable_extradata(avctx)) {
+         UInt32 format_size = sizeof(in_format);
+         UInt32 cookie_size;
+@@ -334,6 +415,36 @@ static av_cold int ffat_create_decoder(AVCodecContext *avctx,
+             return AVERROR(ENOMEM);
+         status = AudioFormatGetProperty(kAudioFormatProperty_FormatInfo,
+                                         cookie_size, cookie, &format_size, &in_format);
++        if (status == 0 && avctx->codec_id == AV_CODEC_ID_AAC) {
++            /* FormatInfo describes the AAC core only: HE-AAC's core is half
++             * its rate, and HE-AACv2's is mono. FormatList lists every layer
++             * the configuration describes, richest first, so decode that. */
++            UInt32 list_size = 0;
++            AudioFormatInfo info = {
++                .mASBD = in_format,
++                .mMagicCookie = cookie,
++                .mMagicCookieSize = cookie_size,
++            };
++            if (!AudioFormatGetPropertyInfo(kAudioFormatProperty_FormatList,
++                                            sizeof(info), &info, &list_size) &&
++                list_size >= sizeof(AudioFormatListItem)) {
++                AudioFormatListItem *list = av_malloc(list_size);
++                if (!list) {
++                    if (cookie != at->extradata)
++                        av_free(cookie);
++                    return AVERROR(ENOMEM);
++                }
++                if (!AudioFormatGetProperty(kAudioFormatProperty_FormatList,
++                                            sizeof(info), &info, &list_size, list) &&
++                    list_size >= sizeof(AudioFormatListItem)) {
++                    av_log(avctx, AV_LOG_DEBUG, "AudioToolbox format list: %u layers, richest %u Hz %u channels\n",
++                           (unsigned)(list_size / sizeof(*list)),
++                           (unsigned)list[0].mASBD.mSampleRate, (unsigned)list[0].mASBD.mChannelsPerFrame);
++                    in_format = list[0].mASBD;
++                }
++                av_free(list);
++            }
++        }
+         if (cookie != at->extradata)
+             av_free(cookie);
+         if (status != 0) {
+@@ -421,7 +532,11 @@ static av_cold int ffat_init_decoder(AVCodecContext *avctx)
+         memcpy(at->extradata, avctx->extradata, avctx->extradata_size);
+     }
+ 
+-    if ((avctx->ch_layout.nb_channels && avctx->sample_rate) || ffat_usable_extradata(avctx))
++    /* AAC without a configuration (ADTS) waits for the one aac_adtstoasc
++     * gives the first packet: the stream's rate and channels can be HE-AAC's
++     * output, which isn't what its packets decode as without it. */
++    if (ffat_usable_extradata(avctx) ||
++        (avctx->ch_layout.nb_channels && avctx->sample_rate && avctx->codec_id != AV_CODEC_ID_AAC))
+         return ffat_create_decoder(avctx, NULL);
+     else
+         return 0;

@@ -64,8 +64,9 @@ typedef struct {
     // it.
     struct DecoderHW *hw;
 
-    // The packets sent to Android's audio decoder (#77) while it has returned
-    // no frame, or -1 once one has come out, and for every other decoder. A
+    // The packets sent to the phone's own audio decoder (#77), Android's or
+    // Apple's, while it has returned no frame, or -1 once one has come out,
+    // and for every other decoder. A
     // decoder that opens and never returns a frame ends Next with
     // GOFFMPEG_NO_AUDIO_FRAME (#95).
     int a_unanswered;
@@ -210,11 +211,12 @@ int decoder_set_audio_channels(Decoder *d, int channels);
 // response, so the position is past it. A clean end has the position at the
 // size, and a demuxer that stops before trailing bytes leaves it short.
 #define GOFFMPEG_TRUNCATED 4
-// GOFFMPEG_NO_AUDIO_FRAME means Android's audio decoder opened and returned no
-// frame (#95): it failed before its first frame, reached the end of the input
-// without one, or was sent MEDIACODEC_AUDIO_NO_FRAME_PACKETS packets without
-// answering one. The phones carry no FFmpeg AAC decoder to fall back to (#77),
-// so the audio cannot play; decoder_audio_decoder names the decoder.
+// GOFFMPEG_NO_AUDIO_FRAME means the phone's own audio decoder (Android's
+// aac_mediacodec, Apple's aac_at) opened and returned no frame (#95): it failed
+// before its first frame, reached the end of the input without one, or was
+// sent MEDIACODEC_AUDIO_NO_FRAME_PACKETS packets without answering one. The
+// phones carry no FFmpeg AAC decoder to fall back to (#77), so the audio
+// cannot play; decoder_audio_decoder names the decoder.
 #define GOFFMPEG_NO_AUDIO_FRAME 5
 int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, 5=no audio frame, <0=Error
 // decoder_audio_decoder names the decoder the audio stream opened with ("aac",

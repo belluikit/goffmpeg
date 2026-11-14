@@ -79,7 +79,7 @@ jobs:
       # set (#41): MP3 and WAV, no video, no libswscale. Only its own tests and
       # the codec-set tests run under the tag; the rest expect video.
       - name: Test (cgo, audio only)
-        run: go test -count=1 -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg' .
+        run: go test -count=1 -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestAAC|TestLinksSharedFFmpeg' .
 
       # purego dlopens libgoffmpeg rather than linking it, and a fresh checkout
       # has no dist/ (it is gitignored). Stage the shared library out of the
@@ -307,7 +307,7 @@ jobs:
           unset CGO_CFLAGS CGO_LDFLAGS
           go test -race -count=1 ./...
           go test -count=1 -v -run 'TestLinksSharedFFmpeg|TestVideoImportsSwscale' .
-          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg' .
+          go test -count=1 -v -tags goffmpeg_novideo -run 'NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestAAC|TestLinksSharedFFmpeg' .
           CGO_ENABLED=0 go test -count=1 ./...
 
       - name: Restore go.mod
@@ -500,7 +500,7 @@ jobs:
           scripts/linux-floor.sh '
             go test -race -count=1 ./...
             go test -count=1 -v -run "TestLinksSharedFFmpeg|TestVideoImportsSwscale" .
-            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg" .'
+            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestAAC|TestLinksSharedFFmpeg" .'
 
       - name: Restore go.mod
         if: always() && matrix.target == 'linux_amd64'
@@ -673,7 +673,7 @@ jobs:
           CGO_ENABLED: "1"
           CC: ${{ matrix.cc }}
           GOFLAGS: -mod=mod
-        run: go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg" .
+        run: go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestAAC|TestLinksSharedFFmpeg" .
 
       - name: Test (purego)
         shell: cmd
@@ -767,7 +767,7 @@ jobs:
           scripts/linux-floor.sh '
             go test -race -count=1 ./...
             go test -count=1 -v -run "TestLinksSharedFFmpeg|TestVideoImportsSwscale" .
-            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestLinksSharedFFmpeg" .'
+            go test -count=1 -v -tags goffmpeg_novideo -run "NoVideo|AudioSet|TestBuiltCodecsAreTheSet|TestNoDecoderForADPCM|TestCodecSetPlaysWAV|TestAAC|TestLinksSharedFFmpeg" .'
 
       - name: Test (purego)
         run: scripts/linux-floor.sh 'CGO_ENABLED=0 go test -count=1 ./...'

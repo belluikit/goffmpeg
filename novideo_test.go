@@ -55,9 +55,23 @@ func TestNoVideoDecodesAudioOnly(t *testing.T) {
 	}
 }
 
+// audioSetReadsMP4 is whether the loaded audio set has the mov demuxer, which
+// it gained with AAC (#77 decision C). The published goffmpeg-libs' audio set
+// predates it until their next release.
+func audioSetReadsMP4() bool {
+	_, demuxers := builtComponents()
+	for _, d := range demuxers {
+		if strings.HasPrefix(d, "mov,") {
+			return true
+		}
+	}
+	return false
+}
+
 // An input with nothing an audio-only build decodes, a video with no audio,
 // fails to open with a clear error instead of opening and yielding nothing
-// (#41). The audio set has no MP4 demuxer, so it can't read the file at all:
+// (#41). The audio set reads MP4 (#77), so it is ErrNoDecoder naming the
+// video; an audio set from before that can't read the file at all:
 // ErrUnrecognizedInput.
 func TestNoVideoVideoOnlyInputFails(t *testing.T) {
 	dec, err := Open("testdata/sample_video_cover.mp4") // video and cover art, no audio
@@ -65,21 +79,62 @@ func TestNoVideoVideoOnlyInputFails(t *testing.T) {
 		dec.Close()
 		t.Fatal("a video-only file opened in an audio-only build")
 	}
-	if !errors.Is(err, ErrUnrecognizedInput) {
-		t.Fatalf("%v, want ErrUnrecognizedInput", err)
+	if !audioSetReadsMP4() {
+		if !errors.Is(err, ErrUnrecognizedInput) {
+			t.Fatalf("%v, want ErrUnrecognizedInput", err)
+		}
+		return
+	}
+	if !errors.Is(err, ErrNoDecoder) || !strings.Contains(err.Error(), "video h264") {
+		t.Fatalf("%v, want ErrNoDecoder naming video h264", err)
 	}
 }
 
-// The audio set reads no MP4 (#41): opening one says the build has no demuxer
-// for it, which is what an app shows a user who picks a file it can't play.
-func TestAudioSetRefusesMP4(t *testing.T) {
-	dec, err := Open("testdata/sample.mp4")
-	if err == nil {
-		dec.Close()
-		t.Fatal("the audio set opened an MP4")
+// The audio set plays an MP4's AAC and leaves its video out (#77 decision C):
+// VideoInfo names the video's codec in MissingDecoder, and no video frame
+// comes. Before that it read no MP4, and said so with ErrUnrecognizedInput.
+func TestAudioSetPlaysMP4Audio(t *testing.T) {
+	dec, err := Open("testdata/sample.mp4") // H.264 and AAC-LC mono
+	if !audioSetReadsMP4() {
+		if err == nil {
+			dec.Close()
+			t.Fatal("an audio set without the mov demuxer opened an MP4")
+		}
+		if !errors.Is(err, ErrUnrecognizedInput) {
+			t.Errorf("%v, want ErrUnrecognizedInput", err)
+		}
+		return
 	}
-	if !errors.Is(err, ErrUnrecognizedInput) {
-		t.Errorf("%v, want ErrUnrecognizedInput", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	if v := dec.VideoInfo(); v.MissingDecoder != "h264" || v.Width != 0 {
+		t.Errorf("VideoInfo %+v, want no video and MissingDecoder h264", v)
+	}
+	if a := dec.AudioInfo(); a.SampleRate != 44100 || a.Channels != 1 {
+		t.Errorf("AudioInfo %+v, want 44100 Hz mono", a)
+	}
+	var video, samples int
+	for {
+		mt, err := dec.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mt == MediaTypeNone {
+			break
+		}
+		if mt == MediaTypeVideo {
+			video++
+		}
+		if mt == MediaTypeAudio {
+			b, _ := dec.GetAudio()
+			samples += len(b) / 2
+		}
+	}
+	// 4 s of mono at 44.1 kHz, as TestAACClips has it.
+	if video != 0 || samples != 176400 {
+		t.Errorf("%d video frames and %d samples, want none and 176400", video, samples)
 	}
 }
 

@@ -44,6 +44,147 @@ static int find_video_stream(AVFormatContext *fmt) {
 
 static int receive(AVCodecContext *ctx, AVFrame *f);
 
+#ifdef __ANDROID__
+// Android's MediaCodec, in both sets: the media set opens it for video (below)
+// and AAC, the audio set for AAC (#77).
+//
+// FFmpeg asks for a Java VM on every MediaCodec open, to look the decoder up
+// by profile, and logs "No Java virtual machine has been registered" at error
+// level when none was set with av_jni_set_java_vm. It then finds the decoder
+// through the NDK, which needs no VM, and decodes. So the message is no error
+// here, and at goffmpeg's default level (LogError, #19) it would print twice
+// for every video an app opens. This demotes that one message to verbose; the
+// callback is installed once, the first time MediaCodec is opened, and passes
+// everything else to FFmpeg's own.
+//
+// It also watches the open for the lookup's failure (#85). mediacodec_opening
+// is the context open_mediacodec is opening on this thread; FFmpeg logs the
+// failure against that context, from inside avcodec_open2, so on the same
+// thread.
+static __thread const void *mediacodec_opening;
+static __thread int mediacodec_no_lookup;
+static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
+    if (fmt && strcmp(fmt, "No Java virtual machine has been registered\n") == 0) level = AV_LOG_VERBOSE;
+    if (avcl && avcl == mediacodec_opening && fmt && strncmp(fmt, "Failed to getCodecNameByType(", 29) == 0)
+        mediacodec_no_lookup = 1;
+    av_log_default_callback(avcl, level, fmt, vl);
+}
+static void mediacodec_log_install(void) { av_log_set_callback(mediacodec_log); }
+static pthread_once_t mediacodec_log_once = PTHREAD_ONCE_INIT;
+
+// mediacodec_find_java_vm hands FFmpeg the app's Java VM, when the process has
+// one and nothing has set it yet (#69). FFmpeg looks up a MediaCodec decoder
+// for the stream's profile and level through Java, and without a VM it falls
+// back to any decoder of the type, through the NDK. JNI_GetCreatedJavaVMs is
+// public NDK API from Android 12 (API 31), in libnativehelper. It is looked up
+// at run time, so the library still loads on older Android, where this does
+// nothing. A process with no VM, a test binary, finds none and is unchanged.
+static void mediacodec_find_java_vm(void) {
+    if (av_jni_get_java_vm(NULL)) return;
+    void *lib = dlopen("libnativehelper.so", RTLD_NOW);
+    if (!lib) return;
+    jint (*created)(JavaVM **, jsize, jsize *) =
+        (jint (*)(JavaVM **, jsize, jsize *))dlsym(lib, "JNI_GetCreatedJavaVMs");
+    JavaVM *vm = NULL;
+    jsize n = 0;
+    if (created && created(&vm, 1, &n) == JNI_OK && n > 0 && vm)
+        av_jni_set_java_vm(vm, NULL);
+    // libnativehelper stays loaded: FFmpeg keeps using the VM it returned.
+}
+static pthread_once_t mediacodec_vm_once = PTHREAD_ONCE_INIT;
+
+// mediacodec_binder_pool starts a binder thread pool in a process with no Java
+// VM, which has none unless it started one itself: a test binary, a
+// command-line tool, a daemon (#86). MediaCodec's decoder runs in a media
+// process and hands its results back over binder, as calls into this process.
+// Where the Codec2 service is the AIDL one (Pixel 9a, Android 17), nothing
+// receives them without a pool: MediaCodec takes two packets, then offers no
+// input buffer and gives no frame, and FFmpeg's mediacodec_receive_frame polls
+// both with no timeout, forever, without returning to the bridge, so the
+// HW_PENDING_MAX fallback (#81) never runs (measured: 14,782 polls in a
+// 5-second run, one core busy). The OnePlus Pad 2 and the moto g power 2024
+// decode without a pool.
+//
+// An app's process always has a pool, started before any app code runs, so a
+// process with a VM is left alone. On Android 10 and 11, where
+// mediacodec_find_java_vm finds no VM, an app makes the call too, and it does
+// nothing there: ABinderProcess_startThreadPool does nothing in a process
+// whose pool has started. It is in libbinder_ndk from Android 10 (API 29) and
+// is looked up at run time, so the library still loads before that, where
+// this does nothing.
+//
+// GOFFMPEG_TEST_NO_BINDER_POOL=1 skips this, for TestHardwareDecodeStall: it
+// brings back #86's stall, which patches/0001 must end with a fallback (#88).
+static void mediacodec_binder_pool(void) {
+    const char *off = getenv("GOFFMPEG_TEST_NO_BINDER_POOL");
+    if (off && strcmp(off, "1") == 0) return;
+    if (av_jni_get_java_vm(NULL)) return;
+    void *lib = dlopen("libbinder_ndk.so", RTLD_NOW);
+    if (!lib) return;
+    void (*start)(void) = (void (*)(void))dlsym(lib, "ABinderProcess_startThreadPool");
+    if (start) start();
+    // libbinder_ndk stays loaded: its threads run in it.
+}
+static pthread_once_t mediacodec_pool_once = PTHREAD_ONCE_INIT;
+
+// open_mediacodec_aac opens Android's own AAC decoder, through FFmpeg's
+// aac_mediacodec, so the phones carry no FFmpeg AAC decoder (#77). On every
+// device measured that is c2.android.aac.decoder, a software decoder in
+// Android's media process. #85's refusal of a decoder with no hardware does
+// not apply: FFmpeg's audio decoders do no lookup by profile, and create
+// theirs by type (mediacodecdec_common.c, mediacodec_dec_get_audio_codec), so
+// there is no failed lookup to watch for. The setup is open_mediacodec's: the
+// log hook, the binder pool (#86) and the NDK API, which ndk_codec keeps even
+// once a video open has given FFmpeg the app's Java VM. With the VM, FFmpeg
+// would use MediaCodec's Java API instead, which was not measured.
+static void mediacodec_setup(void) {
+    pthread_once(&mediacodec_log_once, mediacodec_log_install);
+    pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
+    pthread_once(&mediacodec_pool_once, mediacodec_binder_pool);
+}
+static AVCodecContext *open_mediacodec_aac(AVStream *st) {
+    const AVCodec *codec = avcodec_find_decoder_by_name("aac_mediacodec");
+    if (!codec) return NULL;
+    mediacodec_setup();
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return NULL;
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "ndk_codec", "1", 0);
+    if (avcodec_open2(ctx, codec, &opts) < 0) avcodec_free_context(&ctx);
+    av_dict_free(&opts);
+    return ctx;
+}
+
+// mediacodec_probe_opts gives FFmpeg's stream probing the same setup for
+// AAC. avformat_find_stream_info decodes a little of each stream to learn
+// what the container does not say, such as the sample format, and HE-AAC's
+// real rate where the ADTS header gives only the core's. With no FFmpeg AAC
+// decoder (#77), it opens aac_mediacodec to do that. Without the binder pool a
+// Pixel 9a never returned from it, and without ndk_codec it would use the Java
+// API once a VM is set. Returns the per-stream options for the call, or NULL
+// with no AAC stream; mediacodec_probe_opts_free frees them.
+static AVDictionary **mediacodec_probe_opts(AVFormatContext *fmt) {
+    AVDictionary **opts = NULL;
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        if (fmt->streams[i]->codecpar->codec_id != AV_CODEC_ID_AAC) continue;
+        if (!opts) {
+            if (!avcodec_find_decoder_by_name("aac_mediacodec")) return NULL;
+            opts = av_calloc(fmt->nb_streams, sizeof(*opts));
+            if (!opts) return NULL;
+            mediacodec_setup();
+        }
+        av_dict_set(&opts[i], "ndk_codec", "1", 0);
+    }
+    return opts;
+}
+static void mediacodec_probe_opts_free(AVDictionary **opts, unsigned n) {
+    if (!opts) return;
+    for (unsigned i = 0; i < n; i++) av_dict_free(&opts[i]);
+    av_free(opts);
+}
+#endif
+
 #ifndef GOFFMPEG_NO_VIDEO
 // The phone's hardware decoder (#65). bridge.h's decoder_video_decoder says
 // when each is used. Two kinds, opened differently:
@@ -168,84 +309,6 @@ static AVCodecContext *open_software_video(AVStream *st) {
 // that cost is more than the software decoding it replaces.
 #define MEDIACODEC_MIN_PIXELS (1280 * 720)
 
-// FFmpeg asks for a Java VM on every MediaCodec open, to look the decoder up
-// by profile, and logs "No Java virtual machine has been registered" at error
-// level when none was set with av_jni_set_java_vm. It then finds the decoder
-// through the NDK, which needs no VM, and decodes. So the message is no error
-// here, and at goffmpeg's default level (LogError, #19) it would print twice
-// for every video an app opens. This demotes that one message to verbose; the
-// callback is installed once, the first time MediaCodec is opened, and passes
-// everything else to FFmpeg's own.
-//
-// It also watches the open for the lookup's failure (#85). mediacodec_opening
-// is the context open_mediacodec is opening on this thread; FFmpeg logs the
-// failure against that context, from inside avcodec_open2, so on the same
-// thread.
-static __thread const void *mediacodec_opening;
-static __thread int mediacodec_no_lookup;
-static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
-    if (fmt && strcmp(fmt, "No Java virtual machine has been registered\n") == 0) level = AV_LOG_VERBOSE;
-    if (avcl && avcl == mediacodec_opening && fmt && strncmp(fmt, "Failed to getCodecNameByType(", 29) == 0)
-        mediacodec_no_lookup = 1;
-    av_log_default_callback(avcl, level, fmt, vl);
-}
-static void mediacodec_log_install(void) { av_log_set_callback(mediacodec_log); }
-static pthread_once_t mediacodec_log_once = PTHREAD_ONCE_INIT;
-
-// mediacodec_find_java_vm hands FFmpeg the app's Java VM, when the process has
-// one and nothing has set it yet (#69). FFmpeg looks up a MediaCodec decoder
-// for the stream's profile and level through Java, and without a VM it falls
-// back to any decoder of the type, through the NDK. JNI_GetCreatedJavaVMs is
-// public NDK API from Android 12 (API 31), in libnativehelper. It is looked up
-// at run time, so the library still loads on older Android, where this does
-// nothing. A process with no VM, a test binary, finds none and is unchanged.
-static void mediacodec_find_java_vm(void) {
-    if (av_jni_get_java_vm(NULL)) return;
-    void *lib = dlopen("libnativehelper.so", RTLD_NOW);
-    if (!lib) return;
-    jint (*created)(JavaVM **, jsize, jsize *) =
-        (jint (*)(JavaVM **, jsize, jsize *))dlsym(lib, "JNI_GetCreatedJavaVMs");
-    JavaVM *vm = NULL;
-    jsize n = 0;
-    if (created && created(&vm, 1, &n) == JNI_OK && n > 0 && vm)
-        av_jni_set_java_vm(vm, NULL);
-    // libnativehelper stays loaded: FFmpeg keeps using the VM it returned.
-}
-static pthread_once_t mediacodec_vm_once = PTHREAD_ONCE_INIT;
-
-// mediacodec_binder_pool starts a binder thread pool in a process with no Java
-// VM, which has none unless it started one itself: a test binary, a
-// command-line tool, a daemon (#86). MediaCodec's decoder runs in a media
-// process and hands its results back over binder, as calls into this process.
-// Where the Codec2 service is the AIDL one (Pixel 9a, Android 17), nothing
-// receives them without a pool: MediaCodec takes two packets, then offers no
-// input buffer and gives no frame, and FFmpeg's mediacodec_receive_frame polls
-// both with no timeout, forever, without returning to the bridge, so the
-// HW_PENDING_MAX fallback (#81) never runs (measured: 14,782 polls in a
-// 5-second run, one core busy). The OnePlus Pad 2 and the moto g power 2024
-// decode without a pool.
-//
-// An app's process always has a pool, started before any app code runs, so a
-// process with a VM is left alone. On Android 10 and 11, where
-// mediacodec_find_java_vm finds no VM, an app makes the call too, and it does
-// nothing there: ABinderProcess_startThreadPool does nothing in a process
-// whose pool has started. It is in libbinder_ndk from Android 10 (API 29) and
-// is looked up at run time, so the library still loads before that, where
-// this does nothing.
-//
-// GOFFMPEG_TEST_NO_BINDER_POOL=1 skips this, for TestHardwareDecodeStall: it
-// brings back #86's stall, which patches/0001 must end with a fallback (#88).
-static void mediacodec_binder_pool(void) {
-    const char *off = getenv("GOFFMPEG_TEST_NO_BINDER_POOL");
-    if (off && strcmp(off, "1") == 0) return;
-    if (av_jni_get_java_vm(NULL)) return;
-    void *lib = dlopen("libbinder_ndk.so", RTLD_NOW);
-    if (!lib) return;
-    void (*start)(void) = (void (*)(void))dlsym(lib, "ABinderProcess_startThreadPool");
-    if (start) start();
-    // libbinder_ndk stays loaded: its threads run in it.
-}
-static pthread_once_t mediacodec_pool_once = PTHREAD_ONCE_INIT;
 
 static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
@@ -297,62 +360,6 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     return ctx;
 }
 
-// open_mediacodec_aac opens Android's own AAC decoder, through FFmpeg's
-// aac_mediacodec, so the phones carry no FFmpeg AAC decoder (#77). On every
-// device measured that is c2.android.aac.decoder, a software decoder in
-// Android's media process. #85's refusal of a decoder with no hardware does
-// not apply: FFmpeg's audio decoders do no lookup by profile, and create
-// theirs by type (mediacodecdec_common.c, mediacodec_dec_get_audio_codec), so
-// there is no failed lookup to watch for. The setup is open_mediacodec's: the
-// log hook, the binder pool (#86) and the NDK API, which ndk_codec keeps even
-// once a video open has given FFmpeg the app's Java VM. With the VM, FFmpeg
-// would use MediaCodec's Java API instead, which was not measured.
-static void mediacodec_setup(void) {
-    pthread_once(&mediacodec_log_once, mediacodec_log_install);
-    pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
-    pthread_once(&mediacodec_pool_once, mediacodec_binder_pool);
-}
-static AVCodecContext *open_mediacodec_aac(AVStream *st) {
-    const AVCodec *codec = avcodec_find_decoder_by_name("aac_mediacodec");
-    if (!codec) return NULL;
-    mediacodec_setup();
-    AVCodecContext *ctx = avcodec_alloc_context3(codec);
-    if (!ctx) return NULL;
-    avcodec_parameters_to_context(ctx, st->codecpar);
-    AVDictionary *opts = NULL;
-    av_dict_set(&opts, "ndk_codec", "1", 0);
-    if (avcodec_open2(ctx, codec, &opts) < 0) avcodec_free_context(&ctx);
-    av_dict_free(&opts);
-    return ctx;
-}
-
-// mediacodec_probe_opts gives FFmpeg's stream probing the same setup for
-// AAC. avformat_find_stream_info decodes a little of each stream to learn
-// what the container does not say, such as the sample format, and HE-AAC's
-// real rate where the ADTS header gives only the core's. With no FFmpeg AAC
-// decoder (#77), it opens aac_mediacodec to do that. Without the binder pool a
-// Pixel 9a never returned from it, and without ndk_codec it would use the Java
-// API once a VM is set. Returns the per-stream options for the call, or NULL
-// with no AAC stream; mediacodec_probe_opts_free frees them.
-static AVDictionary **mediacodec_probe_opts(AVFormatContext *fmt) {
-    AVDictionary **opts = NULL;
-    for (unsigned i = 0; i < fmt->nb_streams; i++) {
-        if (fmt->streams[i]->codecpar->codec_id != AV_CODEC_ID_AAC) continue;
-        if (!opts) {
-            if (!avcodec_find_decoder_by_name("aac_mediacodec")) return NULL;
-            opts = av_calloc(fmt->nb_streams, sizeof(*opts));
-            if (!opts) return NULL;
-            mediacodec_setup();
-        }
-        av_dict_set(&opts[i], "ndk_codec", "1", 0);
-    }
-    return opts;
-}
-static void mediacodec_probe_opts_free(AVDictionary **opts, unsigned n) {
-    if (!opts) return;
-    for (unsigned i = 0; i < n; i++) av_dict_free(&opts[i]);
-    av_free(opts);
-}
 #endif
 
 #ifdef __APPLE__
@@ -586,28 +593,33 @@ const char *decoder_video_decoder(Decoder *d) {
     return d->v_ctx->codec->name;
 }
 
-// MEDIACODEC_AUDIO_NO_FRAME_PACKETS is how many packets Android's audio
+// MEDIACODEC_AUDIO_NO_FRAME_PACKETS is how many packets the phone's own audio
 // decoder is sent without returning a frame before it is taken to have failed
 // (#95). Fed data it cannot decode, c2.android.aac takes every packet and
-// returns nothing, so without a bound the audio fails only at the end of the
-// input, however long that is. Measured on a Pixel 9a, a moto g power 2024 and
+// returns nothing, and so does Apple's aac_at, so without a bound the audio
+// fails only at the end of the input, however long that is. Measured on a Pixel 9a, a moto g power 2024 and
 // a OnePlus Pad 2, the AAC clips in testdata (LC, HE, HEv2 and 5.1; M4A, MP4,
 // ADTS and HLS) returned their first frame after 5 to 8 packets. 64 packets is
 // about 1.5 s of AAC-LC at 44.1 kHz.
 #define MEDIACODEC_AUDIO_NO_FRAME_PACKETS 64
 
-// mediacodec_audio is whether ctx is Android's audio decoder, which on the
-// phones has no FFmpeg decoder to fall back to (#77).
-static int mediacodec_audio(const AVCodecContext *ctx) {
-#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+// platform_audio is whether ctx is the phone's own audio decoder, Android's
+// through MediaCodec or Apple's through AudioToolbox, which the phones have no
+// FFmpeg decoder to fall back from (#77).
+static int platform_audio(const AVCodecContext *ctx) {
+#if defined(__ANDROID__)
     return ctx->codec && ctx->codec->name && strstr(ctx->codec->name, "_mediacodec") != NULL;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+    const char *n = ctx->codec ? ctx->codec->name : NULL;
+    size_t len = n ? strlen(n) : 0;
+    return len > 3 && strcmp(n + len - 3, "_at") == 0;
 #else
     (void)ctx;
     return 0;
 #endif
 }
 
-// audio_no_frame ends decoding for Android's audio decoder returning no frame
+// audio_no_frame ends decoding for the phone's audio decoder returning no frame
 // (#95): ret is what it failed with, 0 for packets it took and never answered.
 static int audio_no_frame(Decoder *d, int ret) {
     av_log(d->a_ctx, AV_LOG_ERROR, "%s returned no frame from %d packets (%s)\n",
@@ -628,11 +640,11 @@ const char *decoder_audio_decoder(Decoder *d) {
 int decoder_setup_streams(Decoder *d) {
     AVDictionary **probe_opts = NULL;
     unsigned probe_streams = d->fmt_ctx->nb_streams;
-#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+#ifdef __ANDROID__
     probe_opts = mediacodec_probe_opts(d->fmt_ctx);
 #endif
     int probed = avformat_find_stream_info(d->fmt_ctx, probe_opts);
-#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+#ifdef __ANDROID__
     mediacodec_probe_opts_free(probe_opts, probe_streams);
 #else
     (void)probe_streams;
@@ -670,7 +682,7 @@ int decoder_setup_streams(Decoder *d) {
     if (d->a_stream_idx >= 0) {
         AVStream *st = d->fmt_ctx->streams[d->a_stream_idx];
         const AVCodec *codec = NULL;
-#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+#ifdef __ANDROID__
         // AAC goes to Android's decoder (#77).
         if (st->codecpar->codec_id == AV_CODEC_ID_AAC) d->a_ctx = open_mediacodec_aac(st);
 #endif
@@ -680,7 +692,7 @@ int decoder_setup_streams(Decoder *d) {
             if (avcodec_open2(d->a_ctx, codec, NULL) < 0) avcodec_free_context(&d->a_ctx);
         }
         if (d->a_ctx) {
-            d->a_unanswered = mediacodec_audio(d->a_ctx) ? 0 : -1;
+            d->a_unanswered = platform_audio(d->a_ctx) ? 0 : -1;
             d->sample_rate = d->a_ctx->sample_rate;
             d->a_frame = av_frame_alloc();
             // 0 = keep the stream's own layout. Callers that need a specific
@@ -945,7 +957,7 @@ int decoder_next(Decoder *d) {
                 frame_position(d, d->a_frame, d->a_stream_idx);
                 return 2;
             }
-            // Android's decoder failing, or drained, before its first frame
+            // The phone's decoder failing, or drained, before its first frame
             // (#95). A drain is a failure only if it was sent something: an
             // audio stream with no packets just ends.
             if (d->a_unanswered >= 0 && ret < 0 && (ret != AVERROR_EOF || d->a_unanswered > 0))
