@@ -108,9 +108,13 @@ const char *decoder_missing(Decoder *d, int media);
 // The phone's hardware decoder is used by default for H.264, VP9 and AV1 (#78)
 // in their 8-bit 4:2:0 profiles (H.264 Baseline, Main and High; VP9 profile 0;
 // AV1 Main): on iOS through VideoToolbox, for VP9 and AV1 only where the device
-// decodes them in hardware, and H.264 always and only there (#77); on Android through MediaCodec, only for frames
-// larger than 1280x720, below which it costs more than it saves
-// (MEDIACODEC_MIN_PIXELS in bridge.c). Elsewhere the video decodes in software
+// decodes them in hardware, and H.264 always and only there (#77); on Android
+// H.264 always and only through MediaCodec too, its hardware decoder, or
+// Android's software one by name for what the hardware can't do, refused at
+// open or failed before its first frame ("h264_mediacodec
+// (c2.android.avc.decoder)", #77 decision B); and VP9 and
+// AV1 on Android through MediaCodec only for frames larger than 1280x720,
+// below which it costs more than it saves (MEDIACODEC_MIN_PIXELS in bridge.c). Elsewhere the video decodes in software
 // (FFmpeg's h264 and vp9, and dav1d for AV1). The environment variable
 // GOFFMPEG_HWDECODE, read at each open, changes that: "0" decodes in software
 // everywhere, "1" also tries the hardware on macOS, and "force" skips the

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image"
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -26,6 +27,10 @@ func firstYCbCr(t *testing.T, path string) (*image.YCbCr, YCbCrInfo, error) {
 	img := paddedYCbCr(vi.Width, vi.Height, 16)
 	for i := 0; i < 200; i++ {
 		mt, err := dec.Next()
+		if errors.Is(err, ErrNoDecoder) {
+			// The phone's own decoder gave no frame (#77 decision A).
+			return nil, YCbCrInfo{}, err
+		}
 		if err != nil || mt == MediaTypeNone {
 			t.Fatalf("%s: no video frame (%v)", path, err)
 		}
@@ -123,9 +128,18 @@ func TestGetYCbCrColorInfo(t *testing.T) {
 	}
 }
 
-// A format GetYCbCr does not copy is refused by name, not converted.
+// A format GetYCbCr does not copy is refused by name, not converted. On the
+// phones, which decode H.264 only with their own decoders (#77), a High 4:4:4
+// stream gives no frame to refuse: it ends in ErrNoDecoder (decision A), or
+// the device decodes it to 4:2:0 itself, as the Pixel 9a's does.
 func TestGetYCbCrRefusesOtherFormats(t *testing.T) {
 	_, _, err := firstYCbCr(t, "testdata/yuv/yuv444.mp4")
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+		if err == nil || errors.Is(err, ErrNoDecoder) {
+			t.Logf("High 4:4:4 on %s: %v", runtime.GOOS, err)
+			return
+		}
+	}
 	if !errors.Is(err, ErrPixelFormat) {
 		t.Fatalf("err = %v, want ErrPixelFormat", err)
 	}

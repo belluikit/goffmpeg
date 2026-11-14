@@ -1,0 +1,123 @@
+avcodec/mediacodecdec: take H.264's size and colour description from the SPS
+
+goffmpeg #77. Upstream: not submitted yet.
+
+With no h264 decoder for stream probing to decode with, h264_mediacodec
+gets the parameters the demuxer and parser give, and two that probing
+used to fill in were missing.
+
+The size: from HLS, a stream's width and height arrive as 0, and
+MediaCodec refuses to configure it. Measured on a OnePlus Pad 2 (Android
+16): "Decoder configure failed, -10000" with width 0, height 0 for
+goffmpeg's HLS test stream, and "Failed to configure codec
+c2.qti.avc.decoder".
+
+The colour description: h264_mediacodec reports the one MediaCodec's
+output format gives. For a stream that says nothing, that is the
+decoder's guess, indistinguishable from a stated one, where h264 leaves
+it unspecified (measured on a OnePlus Pad 2, goffmpeg #65). goffmpeg put
+the stream's own back from the codec parameters stream probing filled in
+with h264.
+
+h264_set_extradata already parses the SPS. It now sets, where the caller
+gave none, the size of the SPS's picture, cropped as h264 crops it; and
+the colour description as h264 does (h264_init_ps): the range and colours
+only where the VUI signals them, the chroma siting as parsed. The output
+format's colour keys are then not used.
+
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index 6bd4f23235..4d0a392c2e 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -63,6 +63,8 @@ typedef struct MediaCodecContext {
+     // The MediaCodec decoder to create, by name, instead of the one the
+     // codec list offers for the stream's type and profile
+     char *codec_name;
++    // The colour description came from the stream's SPS
++    int colour_from_stream;
+ 
+     // AAC with no extradata: the AudioSpecificConfig aac_adtstoasc made from
+     // the first ADTS header, and whether MediaCodec still has to be given it
+@@ -177,6 +179,32 @@ static int h264_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
+         avctx->profile = ff_h264_get_profile(sps);
+         avctx->level = sps->level_idc;
+ 
++        /* The colour description, as h264 sets it from the SPS (h264_init_ps,
++         * h264_field_start): the range and colours only where the VUI signals
++         * them, unspecified otherwise. MediaCodec's output format describes
++         * a stream that says nothing with what the decoder guessed, so a
++         * caller can't tell a stated colour from a guess. */
++        if (sps->vui.video_signal_type_present_flag) {
++            avctx->color_range = sps->vui.video_full_range_flag > 0 ? AVCOL_RANGE_JPEG
++                                                                    : AVCOL_RANGE_MPEG;
++            if (sps->vui.colour_description_present_flag) {
++                avctx->color_primaries = sps->vui.colour_primaries;
++                avctx->color_trc       = sps->vui.transfer_characteristics;
++                avctx->colorspace      = sps->vui.matrix_coeffs;
++            }
++        }
++        avctx->chroma_sample_location = sps->vui.chroma_location;
++        ((MediaCodecContext *)avctx->priv_data)->colour_from_stream = 1;
++
++        /* MediaCodec refuses to configure a video with no size, which is how
++         * a stream the caller hasn't decoded arrives from MPEG-TS and HLS
++         * when no h264 decoder filled it in during probing: the SPS's
++         * picture, cropped as h264 crops it. */
++        if (avctx->width <= 0 || avctx->height <= 0) {
++            avctx->width  = 16 * sps->mb_width  - sps->crop_left - sps->crop_right;
++            avctx->height = 16 * sps->mb_height - sps->crop_top  - sps->crop_bottom;
++        }
++
+         if ((ret = h2645_ps_to_nalu(sps->data, sps->data_size, &data, &data_size)) < 0) {
+             goto done;
+         }
+@@ -474,6 +502,7 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+     s->ctx->delay_flush = s->delay_flush;
+     s->ctx->use_ndk_codec = s->use_ndk_codec;
+     s->ctx->requested_codec_name = s->codec_name;
++    s->ctx->colour_from_stream = s->colour_from_stream;
+ 
+     if ((ret = ff_mediacodec_dec_init(avctx, s->ctx, codec_mime, format)) < 0) {
+         s->ctx = NULL;
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 348bc619e4..6c2e3a55a1 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -665,18 +665,20 @@ static int mediacodec_dec_parse_video_format(AVCodecContext *avctx, MediaCodecDe
+         ff_set_sar(avctx, sar);
+     }
+ 
++    /* With the stream's own colour description (the H.264 SPS), MediaCodec's
++     * is not used: for a stream that states none it is a guess. */
+     AMEDIAFORMAT_GET_INT32(color_range, "color-range", 0);
+-    if (color_range)
++    if (color_range && !s->colour_from_stream)
+         avctx->color_range = ff_AMediaFormatColorRange_to_AVColorRange(color_range);
+ 
+     AMEDIAFORMAT_GET_INT32(color_standard, "color-standard", 0);
+-    if (color_standard) {
++    if (color_standard && !s->colour_from_stream) {
+         avctx->colorspace = ff_AMediaFormatColorStandard_to_AVColorSpace(color_standard);
+         avctx->color_primaries = ff_AMediaFormatColorStandard_to_AVColorPrimaries(color_standard);
+     }
+ 
+     AMEDIAFORMAT_GET_INT32(color_transfer, "color-transfer", 0);
+-    if (color_transfer)
++    if (color_transfer && !s->colour_from_stream)
+         avctx->color_trc = ff_AMediaFormatColorTransfer_to_AVColorTransfer(color_transfer);
+ 
+     av_log(avctx, AV_LOG_INFO,
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index eb954c5eed..be2810f1ff 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -74,6 +74,9 @@ typedef struct MediaCodecDecContext {
+     // The decoder to create by name, or NULL to look one up by type; owned
+     // by the MediaCodecContext's options
+     const char *requested_codec_name;
++    // The stream's SPS gave the colour description (H.264), which
++    // MediaCodec's output format then does not replace
++    int colour_from_stream;
+ 
+     /* Audio: the skip-samples side data of packets sent, by their pts in
+      * microseconds, so each frame gets its own packet's rather than the last

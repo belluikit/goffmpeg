@@ -3,6 +3,9 @@
 package goffmpeg
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"image"
 	"math"
 	"os"
@@ -30,6 +33,33 @@ func hwName() string {
 		return "h264_mediacodec"
 	}
 	return "h264 (videotoolbox)"
+}
+
+// androidH264 reports whether name is MediaCodec decoding H.264 on Android:
+// the hardware decoder, or Android's own software decoder, which the bridge
+// opens by name for a stream the hardware refuses (#77 decision B).
+func androidH264(name string) bool {
+	return name == "h264_mediacodec" || name == "h264_mediacodec (c2.android.avc.decoder)"
+}
+
+// sameAsReference fails unless got's planes are h264Reference's for path: the
+// check for a build with no software h264 to compare with (#77).
+func sameAsReference(t *testing.T, what, path string, got planes) {
+	t.Helper()
+	ref, ok := h264Reference[path]
+	if !ok {
+		t.Fatalf("no h264Reference for %s", path)
+	}
+	h := sha256.New()
+	for _, f := range got.frames {
+		h.Write(f)
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	if len(got.frames) != ref.frames || sum != ref.planes || len(got.infos) == 0 || got.infos[0] != ref.info {
+		t.Errorf("%s: %d frames, planes %s, %+v; software h264 gives %d, %s, %+v", what, len(got.frames), sum, got.infos, ref.frames, ref.planes, ref.info)
+		return
+	}
+	t.Logf("%s: %d frames from %q, the same planes as software h264's", what, len(got.frames), got.decoder)
 }
 
 type decoded struct {
@@ -146,6 +176,13 @@ func TestHardwareDecodeMatchesSoftware(t *testing.T) {
 	if !hwPlatform() {
 		t.Skip("no hardware decoder in the bridge on " + runtime.GOOS)
 	}
+	if !softwareH264() {
+		// The phones (#77): their own decoder is the only one.
+		hw := hwPlanes(t, "testdata/sample.mp4", "")
+		sameAsReference(t, "default", "testdata/sample.mp4", hw)
+		requireHardware(t, decoded{decoder: hw.decoder, last: hw.decoder})
+		return
+	}
 	sw := hwDecodeAll(t, "testdata/sample.mp4", "0")
 	if sw.decoder != "h264" {
 		t.Fatalf("GOFFMPEG_HWDECODE=0 decoded with %q, want h264", sw.decoder)
@@ -155,6 +192,43 @@ func TestHardwareDecodeMatchesSoftware(t *testing.T) {
 	hw := hwDecodeAll(t, "testdata/sample.mp4", "force")
 	sameFrames(t, "GOFFMPEG_HWDECODE=force", hw, sw)
 	requireHardware(t, hw)
+}
+
+// hwDecodeUntilError is hwDecodeAll for a stream that may end in an error:
+// it returns the frames decoded before it, and the error.
+func hwDecodeUntilError(t *testing.T, path, mode string) (decoded, error) {
+	t.Helper()
+	t.Setenv("GOFFMPEG_HWDECODE", mode)
+	dec, err := Open(path)
+	if err != nil {
+		return decoded{}, err
+	}
+	defer dec.Close()
+	info := dec.VideoInfo()
+	var out decoded
+	for i := 0; i < 5000; i++ {
+		mt, err := dec.Next()
+		if err != nil {
+			return out, err
+		}
+		if mt == MediaTypeNone {
+			break
+		}
+		if mt != MediaTypeVideo {
+			continue
+		}
+		rgba := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
+		if err := dec.GetRGBA(rgba); err != nil {
+			return out, err
+		}
+		name := dec.(interface{ videoDecoder() string }).videoDecoder()
+		if out.frames == nil {
+			out.decoder = name
+		}
+		out.last = name
+		out.frames = append(out.frames, rgba)
+	}
+	return out, nil
 }
 
 // A stream MediaCodec cannot decode (High 4:4:4) is left to the software
@@ -187,6 +261,24 @@ func TestHardwareDecodeRefusedProfile(t *testing.T) {
 		{"testdata/sample_444_long.mp4", 100}, // the same, past HW_PENDING_MAX
 	} {
 		t.Run(c.path, func(t *testing.T) {
+			if !softwareH264() {
+				// Android with no FFmpeg h264 (#77): a MediaCodec that
+				// fails before its first frame has nothing behind it, so
+				// Next ends in the error decision A asks for, naming it.
+				// One that decodes High 4:4:4 (the Pixel's Exynos) just
+				// does.
+				got, err := hwDecodeUntilError(t, c.path, "")
+				t.Logf("default: %d frames from %q, then %v", len(got.frames), got.decoder, err)
+				switch {
+				case err == nil && len(got.frames) > 0 && androidH264(got.decoder):
+					t.Logf("this device's MediaCodec decodes High 4:4:4: %d of %d frames", len(got.frames), c.frames)
+				case errors.Is(err, ErrNoDecoder) && strings.Contains(err.Error(), "h264_mediacodec") && len(got.frames) == 0:
+				default:
+					t.Errorf("%d frames from %q, then %v; want frames from MediaCodec, or none and an error wrapping ErrNoDecoder that names h264_mediacodec",
+						len(got.frames), got.decoder, err)
+				}
+				return
+			}
 			sw := hwDecodeAll(t, c.path, "0")
 			if len(sw.frames) != c.frames {
 				t.Fatalf("software decoded %d frames of %s, want %d", len(sw.frames), c.path, c.frames)
@@ -253,6 +345,17 @@ func TestHardwareDecodeSeek(t *testing.T) {
 		}
 		next()
 		return rgba, dec.Position(), dec.(interface{ videoDecoder() string }).videoDecoder()
+	}
+	if !softwareH264() {
+		// The phones (#77): held to software h264's recorded frame.
+		t.Setenv("GOFFMPEG_HWDECODE", "")
+		pos, sum, name := seekPlanes(t)
+		t.Logf("after Seek(2): %q at %.3f s", name, pos)
+		if pos != h264SeekReference.position || sum != h264SeekReference.planes {
+			t.Errorf("after Seek(2): at %v, planes %s; software h264 gives %v, %s",
+				pos, sum, h264SeekReference.position, h264SeekReference.planes)
+		}
+		return
 	}
 	swImg, swPos, _ := after("0")
 	hwImg, hwPos, name := after("force") // as in TestHardwareDecodeMatchesSoftware
@@ -324,6 +427,17 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 		"testdata/yuv/bt709_tv_320.mp4",
 		"testdata/yuv/smpte170m_pc_320.mp4",
 	} {
+		if !softwareH264() {
+			// The phones (#77): held to software h264's recorded planes.
+			// MediaCodec's hardware decoder on the OnePlus Pad 2 refuses
+			// 64x64, and Android's software decoder decodes it (decision B).
+			hw := hwPlanes(t, path, "")
+			sameAsReference(t, "default", path, hw)
+			if runtime.GOOS == "android" && !androidH264(hw.decoder) {
+				t.Errorf("%s: decoded by %q, want MediaCodec", path, hw.decoder)
+			}
+			continue
+		}
 		sw := hwPlanes(t, path, "0")
 		hw := hwPlanes(t, path, "force") // as in TestHardwareDecodeMatchesSoftware
 		t.Logf("%s: %d frames, hardware run decoded by %q", path, len(hw.frames), hw.decoder)
@@ -346,10 +460,11 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 	}
 }
 
-// On Android, MediaCodec decodes only video larger than 1280x720 (#65): below
-// that, it costs more than the software decoding it replaces. VideoToolbox has
-// no threshold. Unset GOFFMPEG_HWDECODE is the default; "1" applies the same
-// rules, so it is checked too.
+// On Android, MediaCodec decodes VP9 and AV1 only larger than 1280x720 (#65):
+// below that, it costs more than the software decoding it replaces. H.264 has
+// no software decoder there any more (#77 decision B), so it goes to MediaCodec
+// at every size. VideoToolbox has no threshold. Unset GOFFMPEG_HWDECODE is the
+// default; "1" applies the same rules, so it is checked too.
 func TestHardwareDecodeSizeThreshold(t *testing.T) {
 	if runtime.GOOS != "android" && runtime.GOOS != "ios" && !(runtime.GOOS == "darwin" && !onVM()) {
 		t.Skip("no default hardware path to check on " + runtime.GOOS)
@@ -369,7 +484,7 @@ func TestHardwareDecodeSizeThreshold(t *testing.T) {
 			// The bridge reads an empty GOFFMPEG_HWDECODE as unset.
 			got := hwDecodeAll(t, c.path, mode)
 			want := hwName()
-			if runtime.GOOS == "android" && !c.large {
+			if runtime.GOOS == "android" && !c.large && softwareH264() {
 				want = "h264"
 			}
 			t.Logf("%s, GOFFMPEG_HWDECODE=%q: %d frames from %q", c.path, mode, len(got.frames), got.decoder)

@@ -65,6 +65,10 @@ static __thread const void *mediacodec_opening;
 static __thread int mediacodec_no_lookup;
 static void mediacodec_log(void *avcl, int level, const char *fmt, va_list vl) {
     if (fmt && strcmp(fmt, "No Java virtual machine has been registered\n") == 0) level = AV_LOG_VERBOSE;
+    // Stream probing is kept off MediaCodec's H.264 decoder by a whitelist
+    // that names no codec (mediacodec_probe_opts), which avcodec_open2
+    // reports as an error.
+    if (fmt && strncmp(fmt, "Codec (", 7) == 0 && strstr(fmt, "not on whitelist")) level = AV_LOG_VERBOSE;
     if (avcl && avcl == mediacodec_opening && fmt && strncmp(fmt, "Failed to getCodecNameByType(", 29) == 0)
         mediacodec_no_lookup = 1;
     av_log_default_callback(avcl, level, fmt, vl);
@@ -164,17 +168,29 @@ static AVCodecContext *open_mediacodec_aac(AVStream *st) {
 // Pixel 9a never returned from it, and without ndk_codec it would use the Java
 // API once a VM is set. Returns the per-stream options for the call, or NULL
 // with no AAC stream; mediacodec_probe_opts_free frees them.
+//
+// It keeps H.264 off MediaCodec, in a build whose only H.264 decoder is
+// h264_mediacodec (#77): probing would open one MediaCodec decoder to learn
+// what the parser and the container already say, then playback opens a
+// second, and each costs 100 to 200 ms (measured on a OnePlus Pad 2,
+// 2026-11-14). A whitelist that names no codec makes the open fail, and
+// probing then goes on without decoding the stream, needing no pixel format.
+// The colour description, which probing used to learn from FFmpeg's h264,
+// h264_mediacodec now takes from the SPS itself (patches/0008).
 static AVDictionary **mediacodec_probe_opts(AVFormatContext *fmt) {
     AVDictionary **opts = NULL;
+    int no_h264 = !avcodec_find_decoder_by_name("h264");
     for (unsigned i = 0; i < fmt->nb_streams; i++) {
-        if (fmt->streams[i]->codecpar->codec_id != AV_CODEC_ID_AAC) continue;
+        enum AVCodecID id = fmt->streams[i]->codecpar->codec_id;
+        if (id == AV_CODEC_ID_AAC && !avcodec_find_decoder_by_name("aac_mediacodec")) continue;
+        if (id != AV_CODEC_ID_AAC && !(id == AV_CODEC_ID_H264 && no_h264)) continue;
         if (!opts) {
-            if (!avcodec_find_decoder_by_name("aac_mediacodec")) return NULL;
             opts = av_calloc(fmt->nb_streams, sizeof(*opts));
             if (!opts) return NULL;
             mediacodec_setup();
         }
-        av_dict_set(&opts[i], "ndk_codec", "1", 0);
+        if (id == AV_CODEC_ID_AAC) av_dict_set(&opts[i], "ndk_codec", "1", 0);
+        else av_dict_set(&opts[i], "codec_whitelist", "none", 0);
     }
     return opts;
 }
@@ -240,6 +256,19 @@ struct DecoderHW {
     // (hw_fragile). After a fallback: the kind that failed.
     int delivered;
     int failed_kind;
+    // MediaCodec with no software decoder behind it: H.264 on Android, whose
+    // set has no FFmpeg h264 (#77 decision B). Its packets are counted, not
+    // kept, and a failure before its first frame ends decoder_next with
+    // GOFFMPEG_NO_VIDEO_FRAME, as HW_PLATFORM's does.
+    int no_fallback;
+    // What decoder_video_decoder reports when MediaCodec was opened by name:
+    // "h264_mediacodec (c2.android.avc.decoder)".
+    char label[64];
+    // H.264 on Android's hardware decoder, whose fallback is Android's
+    // software decoder rather than FFmpeg's h264 (hw_fallback); and, after
+    // that fallback, the kept packets are being sent to it (hw_replay).
+    int android_fallback;
+    int replaying;
 };
 
 // hw_mode reads GOFFMPEG_HWDECODE: 0 software only, 1 the hardware where the
@@ -260,6 +289,7 @@ static void hw_drop_pending(struct DecoderHW *hw) {
     for (int i = 0; i < hw->npending; i++) av_packet_free(&hw->pending[i]);
     hw->npending = 0;
     hw->next_replay = 0;
+    hw->replaying = 0;
 }
 
 static void hw_free(Decoder *d) {
@@ -318,7 +348,10 @@ static AVCodecContext *open_software_video(AVStream *st) {
 #define MEDIACODEC_MIN_PIXELS (1280 * 720)
 
 
-static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
+// open_mediacodec opens MediaCodec's decoder for the stream: the one the codec
+// list offers for its type, or with name the decoder of that name (patches/0007),
+// as Android's own software decoder for what the hardware one refuses (#77).
+static AVCodecContext *open_mediacodec_ctx(AVStream *st, const char *name) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
     pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
     pthread_once(&mediacodec_pool_once, mediacodec_binder_pool);
@@ -326,18 +359,15 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     const AVCodec *codec = avcodec_find_decoder_by_name(
         id == AV_CODEC_ID_VP9 ? "vp9_mediacodec" : id == AV_CODEC_ID_AV1 ? "av1_mediacodec" : "h264_mediacodec");
     if (!codec) return NULL;
-    struct DecoderHW *hw = av_mallocz(sizeof(*hw));
-    AVCodecContext *ctx = hw ? avcodec_alloc_context3(codec) : NULL;
-    if (!ctx) {
-        av_free(hw);
-        return NULL;
-    }
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return NULL;
     avcodec_parameters_to_context(ctx, st->codecpar);
     // With a VM, FFmpeg would otherwise switch to MediaCodec's Java API
     // (mediacodecdec.c: ndk_codec defaults to "no VM"). The NDK API is the one
     // measured on the OPD2403 (#65); the VM is only for the lookup.
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "ndk_codec", "1", 0);
+    if (name) av_dict_set(&opts, "codec_name", name, 0);
     mediacodec_opening = ctx;
     mediacodec_no_lookup = 0;
     int opened = avcodec_open2(ctx, codec, &opts);
@@ -354,17 +384,46 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     // the caller opens the software decoder. Without a VM (a process with no
     // Java, Android before 12) there is no lookup to fail, and the NDK's
     // choice stands, as before.
-    if (opened >= 0 && mediacodec_no_lookup && av_jni_get_java_vm(NULL)) {
+    if (opened >= 0 && !name && mediacodec_no_lookup && av_jni_get_java_vm(NULL)) {
         av_log(ctx, AV_LOG_VERBOSE, "goffmpeg: no hardware %s decoder; decoding in software\n", avcodec_get_name(id));
         opened = AVERROR(ENOSYS);
     }
-    if (opened < 0) {
-        avcodec_free_context(&ctx);
+    if (opened < 0) avcodec_free_context(&ctx);
+    return ctx;
+}
+static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st, const char *name) {
+    struct DecoderHW *hw = av_mallocz(sizeof(*hw));
+    AVCodecContext *ctx = hw ? open_mediacodec_ctx(st, name) : NULL;
+    if (!ctx) {
         av_free(hw);
         return NULL;
     }
     hw->kind = HW_MEDIACODEC;
+    if (name) snprintf(hw->label, sizeof(hw->label), "%s (%s)", ctx->codec->name, name);
     d->hw = hw;
+    return ctx;
+}
+
+// ANDROID_AVC is Android's own software H.264 decoder, in its media process.
+#define ANDROID_AVC "c2.android.avc.decoder"
+
+// open_android_h264 opens H.264 for a build with no FFmpeg h264, the Android
+// media set (#77 decision B): MediaCodec's hardware decoder, and Android's own
+// software decoder for what the hardware can't do. That is a stream the
+// hardware refuses at open (the OnePlus Pad 2's refuses 64x64, measured
+// 2026-11-14), and one it opens and then gives no frame from before its first
+// (the moto g power 2024's takes 32x24 and returns nothing): the packets it was
+// sent are kept and replayed to the software decoder (hw_fallback), as they
+// were to FFmpeg's h264 before (owner, 2026-11-14). The software decoder has
+// nothing behind it. NULL when both refuse, and the stream is left out (#41).
+static AVCodecContext *open_android_h264(Decoder *d, AVStream *st) {
+    AVCodecContext *ctx = open_mediacodec(d, st, NULL);
+    if (ctx) {
+        d->hw->android_fallback = 1;
+        return ctx;
+    }
+    ctx = open_mediacodec(d, st, ANDROID_AVC);
+    if (ctx) d->hw->no_fallback = 1;
     return ctx;
 }
 
@@ -469,14 +528,21 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
     if ((id == AV_CODEC_ID_H264 || id == AV_CODEC_ID_VP9 || id == AV_CODEC_ID_AV1) &&
         (mode == 2 || (mode == 1 && hw_suits(st->codecpar)))) {
 #ifdef __ANDROID__
-        if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
-            ctx = open_mediacodec(d, st);
+        if (id != AV_CODEC_ID_H264 || avcodec_find_decoder_by_name("h264"))
+            if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
+                ctx = open_mediacodec(d, st, NULL);
 #endif
 #ifdef __APPLE__
         if (id != AV_CODEC_ID_H264 || avcodec_find_decoder_by_name("h264"))
             ctx = open_videotoolbox(d, st);
 #endif
     }
+#ifdef __ANDROID__
+    // With no software h264 (the Android media set), H.264 has only
+    // MediaCodec, at every size and whatever GOFFMPEG_HWDECODE says.
+    if (!ctx && id == AV_CODEC_ID_H264 && !avcodec_find_decoder_by_name("h264"))
+        return open_android_h264(d, st);
+#endif
 #ifdef __APPLE__
     // With no software h264 (the iOS media set), H.264 has only Apple's
     // decoder, whatever GOFFMPEG_HWDECODE says.
@@ -501,14 +567,14 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
 static int hw_fragile(Decoder *d) {
     struct DecoderHW *hw = d->hw;
     if (!hw) return 0;
-    if (hw->kind == HW_MEDIACODEC) return !hw->confirmed;
+    if (hw->kind == HW_MEDIACODEC) return !hw->confirmed && !hw->no_fallback;
     if (hw->kind == HW_VIDEOTOOLBOX) return !hw->delivered && d->v_ctx->codec_id == AV_CODEC_ID_AV1;
     return 0;
 }
 
 static void hw_keep(Decoder *d, const AVPacket *pkt) {
     struct DecoderHW *hw = d->hw;
-    if (hw && hw->kind == HW_PLATFORM) {
+    if (hw && (hw->kind == HW_PLATFORM || hw->no_fallback)) {
         if (!hw->confirmed) hw->npending++;
         return;
     }
@@ -524,6 +590,22 @@ static void hw_keep(Decoder *d, const AVPacket *pkt) {
 // (hw_replay). It returns 0, or a negative code when the software decoder
 // will not open either.
 static int hw_fallback(Decoder *d) {
+#ifdef __ANDROID__
+    if (d->hw->android_fallback) {
+        AVCodecContext *sw = open_mediacodec_ctx(d->fmt_ctx->streams[d->v_stream_idx], ANDROID_AVC);
+        if (!sw) return -1;
+        av_log(d->v_ctx, AV_LOG_WARNING, "goffmpeg: MediaCodec's hardware decoder failed before its first frame (%d packets sent); decoding with %s\n",
+               d->hw->npending, ANDROID_AVC);
+        avcodec_free_context(&d->v_ctx);
+        d->v_ctx = sw;
+        snprintf(d->hw->label, sizeof(d->hw->label), "%s (%s)", sw->codec->name, ANDROID_AVC);
+        d->hw->android_fallback = 0;
+        d->hw->no_fallback = 1;
+        d->hw->replaying = 1;
+        d->hw->next_replay = 0;
+        return 0;
+    }
+#endif
     AVCodecContext *sw = open_software_video(d->fmt_ctx->streams[d->v_stream_idx]);
     if (!sw) return -1;
     av_log(d->v_ctx, AV_LOG_WARNING, "goffmpeg: the hardware decoder failed before its first frame (%d packets sent); decoding in software\n", d->hw->npending);
@@ -538,6 +620,13 @@ static int hw_fallback(Decoder *d) {
 // hw_refused handles MediaCodec refusing a packet before its first frame:
 // it falls back and returns 1, or returns 0 when that is not the case or the
 // software decoder will not open.
+// hw_no_fallback_failed is whether the video decoder is one with nothing
+// behind it (MediaCodec for H.264 on Android, h264_videotoolbox on iOS) that
+// has not given its first frame: a failure now ends the stream (#77).
+static int hw_no_fallback_failed(Decoder *d) {
+    struct DecoderHW *hw = d->hw;
+    return hw && !hw->confirmed && (hw->kind == HW_PLATFORM || hw->no_fallback);
+}
 static int hw_refused(Decoder *d) {
     if (!hw_fragile(d)) return 0;
     return hw_fallback(d) == 0;
@@ -547,7 +636,7 @@ static int hw_refused(Decoder *d) {
 // place of a read. It returns 1 when it did, 0 when none is left.
 static int hw_replay(Decoder *d, AVPacket *pkt) {
     struct DecoderHW *hw = d->hw;
-    if (!hw || hw->kind != HW_NONE || hw->next_replay >= hw->npending) return 0;
+    if (!hw || (hw->kind != HW_NONE && !hw->replaying) || hw->next_replay >= hw->npending) return 0;
     av_packet_move_ref(pkt, hw->pending[hw->next_replay++]);
     if (hw->next_replay == hw->npending) hw_drop_pending(hw);
     return 1;
@@ -601,7 +690,10 @@ static int receive_video(Decoder *d) {
         return rc < 0 ? rc : 1;
     }
     int ret = receive(d->v_ctx, d->v_frame);
-    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC) {
+    // H.264 with no software decoder behind it has its colour description
+    // from the SPS (patches/0008), and probing no longer decodes it, so
+    // there is nothing to put back.
+    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC && !hw->no_fallback && !hw->android_fallback) {
         // MediaCodec fills in a colour description the stream may not give:
         // an untagged stream comes out tagged with the matrix MediaCodec
         // guessed, so GetYCbCr would report a guess as stated (measured on the
@@ -617,7 +709,15 @@ static int receive_video(Decoder *d) {
         if (ret == 1) {
             hw->confirmed = 1;
             hw_drop_pending(hw);
-        } else if ((ret < 0 && ret != AVERROR_EOF) || hw_silent(hw, ret)) {
+        } else if ((ret < 0 && ret != AVERROR_EOF) || (!hw->replaying && hw_silent(hw, ret))) {
+            // While the kept packets are replayed to Android's software
+            // decoder, npending counts them, not packets it has failed on.
+            if (hw->no_fallback) {
+                av_log(d->v_ctx, AV_LOG_ERROR, "%s returned no frame from %d packets (%s)\n",
+                       hw->label[0] ? hw->label : d->v_ctx->codec->name, hw->npending,
+                       ret < 0 ? av_err2str(ret) : "no error");
+                return GOFFMPEG_NO_VIDEO_FRAME;
+            }
             if (hw_fallback(d) == 0) return 0;
         }
     }
@@ -629,6 +729,7 @@ static void hw_free(Decoder *d) { (void)d; }
 static void hw_seeked(Decoder *d) { (void)d; }
 static void hw_keep(Decoder *d, const AVPacket *pkt) { (void)d; (void)pkt; }
 static int hw_refused(Decoder *d) { (void)d; return 0; }
+static int hw_no_fallback_failed(Decoder *d) { (void)d; return 0; }
 static int hw_replay(Decoder *d, AVPacket *pkt) { (void)d; (void)pkt; return 0; }
 static int receive_video(Decoder *d) { return receive(d->v_ctx, d->v_frame); }
 #endif
@@ -637,6 +738,8 @@ const char *decoder_video_decoder(Decoder *d) {
     if (!d || !d->v_ctx || !d->v_ctx->codec) return NULL;
 #ifndef GOFFMPEG_NO_VIDEO
     enum AVCodecID id = d->v_ctx->codec_id;
+    if (d->hw && d->hw->kind == HW_MEDIACODEC && d->hw->label[0])
+        return d->hw->label;
     if (d->hw && d->hw->kind == HW_VIDEOTOOLBOX && d->hw->confirmed)
         return id == AV_CODEC_ID_VP9 ? "vp9 (videotoolbox)" : id == AV_CODEC_ID_AV1 ? "av1 (videotoolbox)" : "h264 (videotoolbox)";
     // After hw_fallback the state stays, with no kind.
@@ -1044,6 +1147,9 @@ int decoder_next(Decoder *d) {
         if (hw_replay(d, d->pkt)) {
             int sent = avcodec_send_packet(d->v_ctx, d->pkt);
             av_packet_unref(d->pkt);
+            // Android's software decoder refusing a replayed packet has
+            // nothing behind it either (#77).
+            if (sent < 0 && sent != AVERROR(EAGAIN) && hw_no_fallback_failed(d)) return GOFFMPEG_NO_VIDEO_FRAME;
             if (sent < 0) return sent;
             continue;
         }
@@ -1079,6 +1185,8 @@ int decoder_next(Decoder *d) {
         }
         // MediaCodec refusing a packet before its first frame is a fallback:
         // the packet was kept, and goes to the software decoder with the rest.
+        // With no software decoder (H.264 on Android, #77) it is the end.
+        if (ret < 0 && ret != AVERROR(EAGAIN) && ctx == d->v_ctx && hw_no_fallback_failed(d)) return GOFFMPEG_NO_VIDEO_FRAME;
         if (ret < 0 && ctx == d->v_ctx && hw_refused(d)) ret = 0;
         if (ret < 0) return ret;
     }

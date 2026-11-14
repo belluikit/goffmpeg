@@ -195,11 +195,14 @@ SET_DECODERS = mp3float pcm_s16le pcm_s24le pcm_s32le pcm_f32le pcm_f64le pcm_u8
 SET_PARSERS  = mpegaudio
 SET_HWACCELS =
 SET_INDEVS   =
+SET_BSFS     =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
-	# iOS decodes H.264 with Apple's own decoder, h264_videotoolbox, below
-	# (#77).
-	SET_DECODERS += $(if $(filter ios_% iossimulator_%,$(TARGET)),,h264)
+	# The phones decode H.264 with their own decoders (#77): iOS with Apple's,
+	# h264_videotoolbox, below; Android with MediaCodec's, h264_mediacodec,
+	# hardware first and Android's software decoder for what it can't do
+	# (decision B). So the phones carry no FFmpeg h264.
+	SET_DECODERS += $(if $(filter ios_% iossimulator_% android_%,$(TARGET)),,h264)
 	SET_PARSERS  += h264
 	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
 	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3
@@ -260,6 +263,10 @@ endif
 # aac_adtstoasc filter and the aac parser, and is in the audio set too.
 ifeq ($(SET)$(filter android_%,$(TARGET)),media$(TARGET))
 	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec
+	# MediaCodec needs H.264's SPS and PPS at open. MPEG-TS (HLS) carries
+	# them only in the stream, and with no FFmpeg h264 to read them there
+	# (#77), stream probing takes them out with this filter.
+	SET_BSFS += extract_extradata
 endif
 ifneq ($(filter android_%,$(TARGET)),)
 	SET_DECODERS += aac_mediacodec
@@ -288,6 +295,9 @@ SET_CONF = --disable-decoders --disable-demuxers --disable-parsers --disable-bsf
 	--enable-parser=$(subst $(space),$(comma),$(strip $(SET_PARSERS)))
 ifneq ($(strip $(SET_HWACCELS)),)
 	SET_CONF += --enable-hwaccel=$(subst $(space),$(comma),$(strip $(SET_HWACCELS)))
+endif
+ifneq ($(strip $(SET_BSFS)),)
+	SET_CONF += --enable-bsf=$(subst $(space),$(comma),$(strip $(SET_BSFS)))
 endif
 endif
 ifneq ($(strip $(SET_INDEVS)),)
