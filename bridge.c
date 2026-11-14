@@ -693,7 +693,7 @@ static int receive_video(Decoder *d) {
     // H.264 with no software decoder behind it has its colour description
     // from the SPS (patches/0008), and probing no longer decodes it, so
     // there is nothing to put back.
-    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC && !hw->no_fallback) {
+    if (ret == 1 && hw && hw->kind == HW_MEDIACODEC && !hw->no_fallback && !hw->android_fallback) {
         // MediaCodec fills in a colour description the stream may not give:
         // an untagged stream comes out tagged with the matrix MediaCodec
         // guessed, so GetYCbCr would report a guess as stated (measured on the
@@ -1147,6 +1147,9 @@ int decoder_next(Decoder *d) {
         if (hw_replay(d, d->pkt)) {
             int sent = avcodec_send_packet(d->v_ctx, d->pkt);
             av_packet_unref(d->pkt);
+            // Android's software decoder refusing a replayed packet has
+            // nothing behind it either (#77).
+            if (sent < 0 && sent != AVERROR(EAGAIN) && hw_no_fallback_failed(d)) return GOFFMPEG_NO_VIDEO_FRAME;
             if (sent < 0) return sent;
             continue;
         }

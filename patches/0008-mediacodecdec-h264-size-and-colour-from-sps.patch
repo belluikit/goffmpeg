@@ -1,22 +1,32 @@
-avcodec/mediacodecdec: take H.264's colour description from the SPS
+avcodec/mediacodecdec: take H.264's size and colour description from the SPS
 
 goffmpeg #77. Upstream: not submitted yet.
 
-h264_mediacodec reports the colour description MediaCodec's output
-format gives. For a stream that says nothing, that is the decoder's
-guess, indistinguishable from a stated one, where h264 leaves it
-unspecified (measured on a OnePlus Pad 2, goffmpeg #65). goffmpeg put the
-stream's own back from the codec parameters stream probing filled in
-with h264, and with h264_mediacodec as the only H.264 decoder there is
-no such probe.
+With no h264 decoder for stream probing to decode with, h264_mediacodec
+gets the parameters the demuxer and parser give, and two that probing
+used to fill in were missing.
 
-h264_set_extradata already parses the SPS. It now sets the colour
-description as h264 does (h264_init_ps): the range and colours only where
-the VUI signals them, the chroma siting as parsed. The output format's
-colour keys are then not used.
+The size: from HLS, a stream's width and height arrive as 0, and
+MediaCodec refuses to configure it. Measured on a OnePlus Pad 2 (Android
+16): "Decoder configure failed, -10000" with width 0, height 0 for
+goffmpeg's HLS test stream, and "Failed to configure codec
+c2.qti.avc.decoder".
+
+The colour description: h264_mediacodec reports the one MediaCodec's
+output format gives. For a stream that says nothing, that is the
+decoder's guess, indistinguishable from a stated one, where h264 leaves
+it unspecified (measured on a OnePlus Pad 2, goffmpeg #65). goffmpeg put
+the stream's own back from the codec parameters stream probing filled in
+with h264.
+
+h264_set_extradata already parses the SPS. It now sets, where the caller
+gave none, the size of the SPS's picture, cropped as h264 crops it; and
+the colour description as h264 does (h264_init_ps): the range and colours
+only where the VUI signals them, the chroma siting as parsed. The output
+format's colour keys are then not used.
 
 diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
-index 6bd4f23235..d0f1169e27 100644
+index 6bd4f23235..4d0a392c2e 100644
 --- a/libavcodec/mediacodecdec.c
 +++ b/libavcodec/mediacodecdec.c
 @@ -63,6 +63,8 @@ typedef struct MediaCodecContext {
@@ -28,7 +38,7 @@ index 6bd4f23235..d0f1169e27 100644
  
      // AAC with no extradata: the AudioSpecificConfig aac_adtstoasc made from
      // the first ADTS header, and whether MediaCodec still has to be given it
-@@ -177,6 +179,23 @@ static int h264_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
+@@ -177,6 +179,32 @@ static int h264_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
          avctx->profile = ff_h264_get_profile(sps);
          avctx->level = sps->level_idc;
  
@@ -49,10 +59,19 @@ index 6bd4f23235..d0f1169e27 100644
 +        avctx->chroma_sample_location = sps->vui.chroma_location;
 +        ((MediaCodecContext *)avctx->priv_data)->colour_from_stream = 1;
 +
++        /* MediaCodec refuses to configure a video with no size, which is how
++         * a stream the caller hasn't decoded arrives from MPEG-TS and HLS
++         * when no h264 decoder filled it in during probing: the SPS's
++         * picture, cropped as h264 crops it. */
++        if (avctx->width <= 0 || avctx->height <= 0) {
++            avctx->width  = 16 * sps->mb_width  - sps->crop_left - sps->crop_right;
++            avctx->height = 16 * sps->mb_height - sps->crop_top  - sps->crop_bottom;
++        }
++
          if ((ret = h2645_ps_to_nalu(sps->data, sps->data_size, &data, &data_size)) < 0) {
              goto done;
          }
-@@ -474,6 +493,7 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+@@ -474,6 +502,7 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
      s->ctx->delay_flush = s->delay_flush;
      s->ctx->use_ndk_codec = s->use_ndk_codec;
      s->ctx->requested_codec_name = s->codec_name;
