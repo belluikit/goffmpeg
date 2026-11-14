@@ -36,7 +36,9 @@ HE-AACv2 in M4A and ADTS and mono HE-AAC in both: the same rate,
 channels and sample count, and 73 to 79 dB SNR once aligned. AAC-LC,
 5.1, MP4 and HLS are unchanged (72 to 79 dB). aac_at's HE-AAC output
 starts 962 samples earlier than aac's, and lines up with the AAC-LC
-encoding of the same source at the container's timestamps. AAC-LC at
+encoding of the same source at the container's timestamps. On an iPad
+(10th generation), through goffmpeg, the same clips give the same rate,
+channels and length as aac on macOS, and seek alike. AAC-LC at
 24 kHz or below with no signalling now comes out at twice its rate
 (and mono as stereo), as it does from HE-AAC decoders that assume
 implicit SBR; aac keeps its own rate there.

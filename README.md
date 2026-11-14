@@ -281,7 +281,7 @@ exact lists are in [BUILDING.md](BUILDING.md#what-is-in-the-build).
 
 `-tags goffmpeg_novideo` builds the cgo backend against the audio set: MP3,
 WAV, Opus and AAC, with no libswscale and no libavdevice, on every platform, so an
-app ships 2.0 MB of FFmpeg where the phone media set is 6.6 MB (android_arm64). No video frame arrives,
+app ships 2.2 MB of FFmpeg where the phone media set is 6.5 MB (android_arm64). No video frame arrives,
 `GetRGBA` returns `ErrVideoNotBuilt`, and there's no capture: `OpenDevice`
 says the build has no libavdevice. An MP4 opens with its AAC, and its video is
 left out and named in `VideoInfo().MissingDecoder` (#77). HLS fails to open

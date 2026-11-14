@@ -325,9 +325,11 @@ one input device, the one that reads cameras on each OS (`avfoundation`,
 `v4l2`, `dshow`): the rest aren't used. Every protocol stays, so `http`, and
 `https` where the target has TLS, still open.
 
-On android_arm64 the libraries come to 6.6 MB for the media set and 2.0 MB for
-the audio set, against 14.4 MB for an every-codec build. VP9, AV1 (dav1d) and
-Opus added 1.7 MB and 0.2 MB to them (#78).
+On android_arm64 the libraries come to 6.5 MB for the media set and 2.2 MB for
+the audio set, against 14.4 MB for an every-codec build; on ios_arm64 to 6.6 MB
+and 2.3 MB. VP9, AV1 (dav1d) and Opus added 1.7 MB and 0.2 MB to them (#78).
+Decoding AAC with the phone's own decoder took 0.2 MB off each media set, and
+AAC in the audio set (the mov and aac demuxers) added 0.2 MB to it (#77).
 
 **The sets are enforced, not only configured.** `configure` turns on whatever
 an enabled component selects, so a flag that asks for one decoder can bring
