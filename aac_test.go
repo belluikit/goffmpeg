@@ -59,8 +59,8 @@ func aacDecoder() string {
 
 // aacTestClips are the aacClips the loaded set reads: every one in the media
 // set; in the audio set, which has AAC in M4A, MP4 and ADTS but no HLS (#77
-// decision C), all but the HLS one. It skips the test on an audio set that
-// predates AAC, as the published goffmpeg-libs' does until their next release.
+// decision C), all but the HLS one. An audio set without AAC is older than
+// goffmpeg-libs v0.10.0, which go.mod requires, and fails the test.
 func aacTestClips(t *testing.T) []string {
 	t.Helper()
 	var paths []string
@@ -72,7 +72,7 @@ func aacTestClips(t *testing.T) []string {
 	}
 	_, demuxers := builtComponents()
 	if !slices.ContainsFunc(demuxers, func(d string) bool { return strings.HasPrefix(d, "mov,") }) {
-		t.Skip("the loaded audio set predates AAC (#77)")
+		t.Fatal("the loaded audio set has no mov demuxer: it predates AAC (#77), which goffmpeg-libs v0.10.0 added")
 	}
 	return slices.DeleteFunc(paths, func(p string) bool { return strings.HasSuffix(p, ".m3u8") })
 }
