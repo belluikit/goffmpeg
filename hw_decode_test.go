@@ -426,7 +426,13 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 		// MediaCodec refuses 64x64, so the tagged clips again at 320x240.
 		"testdata/yuv/bt709_tv_320.mp4",
 		"testdata/yuv/smpte170m_pc_320.mp4",
+		// 32x24, which goes to Android's software decoder on every phone
+		// (#101); checked only where there is no software h264.
+		"testdata/sample_video_cover.mp4",
 	} {
+		if path == "testdata/sample_video_cover.mp4" && softwareH264() {
+			continue
+		}
 		if !softwareH264() {
 			// The phones (#77): held to software h264's recorded planes.
 			// MediaCodec's hardware decoder on the OnePlus Pad 2 refuses
