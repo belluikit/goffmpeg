@@ -47,9 +47,8 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	}
 	// AAC in both sets (#77): the phones' own decoders, Android's and Apple's,
 	// so they carry no FFmpeg AAC decoder, and FFmpeg's aac on desktop. The
-	// audio set reads it from M4A and ADTS (decision C). An audio set without
-	// the mov demuxer predates that, as the published goffmpeg-libs do until
-	// their next release: its AAC is not checked.
+	// audio set reads it from M4A and ADTS (decision C), since goffmpeg-libs
+	// v0.10.0.
 	aacDecoder := "aac"
 	switch runtime.GOOS {
 	case "android":
@@ -57,14 +56,9 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	case "ios":
 		aacDecoder = "aac_at"
 	}
-	switch {
-	case testCodecSet == "media":
-		wantDecoders = append(wantDecoders, aacDecoder)
-	case slices.Contains(demuxers, "mov"):
-		wantDecoders = append(wantDecoders, aacDecoder)
+	wantDecoders = append(wantDecoders, aacDecoder)
+	if testCodecSet != "media" {
 		wantDemuxers = append(wantDemuxers, "mov", "aac")
-	default:
-		t.Log("the loaded audio set predates AAC (#77): its AAC is not checked")
 	}
 	// The royalty-free formats (#78, goffmpeg-libs v0.9.0): Opus in Ogg in
 	// both sets; VP9, AV1 (dav1d) and WebM in the media set, with the phones'
