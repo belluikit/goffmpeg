@@ -198,7 +198,7 @@ func (d *cgoDecoder) Position() float64 {
 
 func (d *cgoDecoder) Next() (MediaType, error) {
 	mt, err := d.interrupted.nextResult(d.bridgeNext())
-	return nameAudioDecoder(mt, err, d.audioDecoder)
+	return nameDecoder(mt, err, d.audioDecoder, d.videoDecoder)
 }
 
 func (d *cgoDecoder) bridgeNext() int { return int(C.decoder_next(&d.d)) }

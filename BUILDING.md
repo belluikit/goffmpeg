@@ -304,7 +304,7 @@ avfilter are off in both: this library only ever decodes.
 | Set | Targets | Decoders | Demuxers | Where |
 |---|---|---|---|---|
 | **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has, plus dav1d (`libdav1d`) | every one | `shared/`, `-goffmpeg` |
-| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `vp9`, `libdav1d`, `av1`, `opus`; for AAC the phone's own decoder, `aac_mediacodec` on Android and `aac_at` on iOS (#77); on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
+| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264` (on iOS `h264_videotoolbox`, #77), `vp9`, `libdav1d`, `av1`, `opus`; for AAC the phone's own decoder, `aac_mediacodec` on Android and `aac_at` on iOS (#77); on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
 | **audio** | every target | `mp3float`, the same PCM, `opus`; for AAC `aac` on desktop, `aac_mediacodec` on Android, `aac_at` on iOS (#77 decision C) | `mp3`, `wav`, `ogg`, `mov`, `aac` | `shared-audio/`, `-goffmpeg-audio` |
 
 On the phones the media set decodes only what apps play, so an app carries no
@@ -313,8 +313,10 @@ them. Desktop keeps every codec (the owner's choice on #41). The audio set has
 no libswscale and no libavdevice, on every target; goffmpeg links it under the
 `goffmpeg_novideo` tag.
 
-On the phones, the media set enables VideoToolbox's H.264, VP9 and AV1
-hwaccels (iOS) and no other, has the parsers its formats need (`mpegaudio`,
+On the phones, the media set enables VideoToolbox's VP9 and AV1 hwaccels (iOS)
+and no other; iOS decodes H.264 with `h264_videotoolbox` instead, a decoder of
+its own (`patches/0006`, #77), so it has no software `h264`, whose hwaccel
+would bring it back. It has the parsers its formats need (`mpegaudio`,
 `h264`, `aac`, `vp9`, `av1`, `opus`, and `ac3`, which `hls` selects) and no bitstream filter that isn't selected by something
 it keeps. On Android it also has MediaCodec's H.264 decoder, `h264_mediacodec`
 (goffmpeg-libs#21), which selects the `h264_mp4toannexb` filter. MediaCodec is
@@ -404,8 +406,8 @@ no longer reverses on its own, which was the only check before.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds five patches**, four to FFmpeg's Android MediaCodec decoders and
-one to its AudioToolbox decoder. None has been sent upstream yet, and FFmpeg
+**It holds six patches**, four to FFmpeg's Android MediaCodec decoders, one to
+its AudioToolbox decoder and one that adds a VideoToolbox decoder. None has been sent upstream yet, and FFmpeg
 master had none of these fixes when they were written (checked 2026-11-12 and
 2026-11-13). Each goes when the pin reaches an FFmpeg that fixes it.
 
@@ -425,6 +427,10 @@ master had none of these fixes when they were written (checked 2026-11-12 and
 - `0005-audiotoolboxdec-he-aac-layers.patch` (#77): `aac_at`, Apple's decoder
   on iOS, decodes HE-AAC and HE-AACv2 in full. It decoded only the AAC core:
   half the rate, and HE-AACv2 in mono.
+- `0006-videotoolboxdec-standalone-h264.patch` (#77): `h264_videotoolbox`, an
+  H.264 decoder on VideoToolbox that needs no software `h264`, as
+  `h264_mediacodec` needs none on Android. FFmpeg had VideoToolbox's H.264
+  only as a hwaccel of its own `h264` decoder.
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream

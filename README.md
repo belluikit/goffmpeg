@@ -172,15 +172,22 @@ headers or a Homebrew FFmpeg. See [BUILDING.md](BUILDING.md).
 
 ## Hardware decoding
 
-On iOS, H.264 video decodes on VideoToolbox by default, and VP9 and AV1 do
-where the device decodes them in hardware (an iPad of the 10th generation does
-neither, and decodes them in software). On Android H.264, VP9 and AV1 decode on
+On iOS, H.264 decodes only on VideoToolbox, through `h264_videotoolbox`, a
+decoder of its own (`patches/0006`), and the iOS builds carry no software
+H.264 decoder (#77). VP9 and AV1 decode on VideoToolbox where the device
+decodes them in hardware (an iPad of the 10th generation does neither, and
+decodes them in software). On Android H.264, VP9 and AV1 decode on
 MediaCodec (`h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec`) when the
 video is larger than 1280×720, and in software at that size and below, where
 MediaCodec costs more than it saves (measured below). Only 8-bit 4:2:0 streams
 go to the hardware: H.264 Baseline, Main and High, VP9 profile 0, AV1 Main.
 Anything else (High 4:4:4, 10-bit, other codecs)
-decodes in software, and so does a stream the hardware decoder will not open.
+decodes in software, and so does a stream the hardware decoder will not open,
+except H.264 on iOS, which has no software decoder: a stream VideoToolbox
+won't open is left out, and `VideoInfo().MissingDecoder` says `"h264"`. If it
+opens and gives no frame (an error first, the end of the input, or 64 packets
+without one), `Next` returns an error wrapping `ErrNoDecoder` that names
+`h264_videotoolbox`.
 So does a stream the device has no hardware decoder for, such as AV1 on most
 phones without a flagship chip: Android would otherwise decode it with its own
 software decoder in its media process, which costs more than goffmpeg's (#85).
@@ -226,7 +233,7 @@ environment variable, read when each input is opened, controls this:
 | `GOFFMPEG_HWDECODE` | |
 |---|---|
 | unset | hardware on iOS, and on Android above 1280×720; software elsewhere |
-| `0` | software video everywhere (AAC on Android still decodes on Android's decoder) |
+| `0` | software video everywhere, except H.264 on iOS, which has only VideoToolbox (and AAC on the phones, which decodes on their own decoders) |
 | `1` | as unset, and also VideoToolbox on macOS |
 | `force` | the hardware wherever the bridge has it, without the profile and size checks (for tests) |
 

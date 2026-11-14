@@ -98,7 +98,8 @@ int decoder_setup_streams(Decoder *d);
 const char *decoder_missing(Decoder *d, int media);
 
 // decoder_video_decoder names what decodes the video (#65): the codec's name
-// ("h264", "vp9", "libdav1d", "h264_mediacodec", "av1_mediacodec"), with
+// ("h264", "vp9", "libdav1d", "h264_mediacodec", "av1_mediacodec", and on iOS
+// "h264_videotoolbox", Apple's decoder as a decoder of its own, #77), with
 // " (videotoolbox)" added once a frame has come out of VideoToolbox (as in
 // "vp9 (videotoolbox)"), and "<software> (after <mediacodec> failed)" once the
 // software decoder has replaced MediaCodec. NULL when no video stream is open.
@@ -107,7 +108,7 @@ const char *decoder_missing(Decoder *d, int media);
 // The phone's hardware decoder is used by default for H.264, VP9 and AV1 (#78)
 // in their 8-bit 4:2:0 profiles (H.264 Baseline, Main and High; VP9 profile 0;
 // AV1 Main): on iOS through VideoToolbox, for VP9 and AV1 only where the device
-// decodes them in hardware; on Android through MediaCodec, only for frames
+// decodes them in hardware, and H.264 always and only there (#77); on Android through MediaCodec, only for frames
 // larger than 1280x720, below which it costs more than it saves
 // (MEDIACODEC_MIN_PIXELS in bridge.c). Elsewhere the video decodes in software
 // (FFmpeg's h264 and vp9, and dav1d for AV1). The environment variable
@@ -218,7 +219,12 @@ int decoder_set_audio_channels(Decoder *d, int channels);
 // phones carry no FFmpeg AAC decoder to fall back to (#77), so the audio
 // cannot play; decoder_audio_decoder names the decoder.
 #define GOFFMPEG_NO_AUDIO_FRAME 5
-int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, 5=no audio frame, <0=Error
+// GOFFMPEG_NO_VIDEO_FRAME is the same for video, on iOS, where H.264 decodes
+// only through Apple's h264_videotoolbox (#77): it opened and returned no frame
+// before an error, the end of the input or HW_PENDING_MAX packets.
+// decoder_video_decoder names the decoder.
+#define GOFFMPEG_NO_VIDEO_FRAME 6
+int decoder_next(Decoder *d); // 1=Video, 2=Audio, 0=EOF, 3=no data yet, 4=truncated, 5=no audio frame, 6=no video frame, <0=Error
 // decoder_audio_decoder names the decoder the audio stream opened with ("aac",
 // "aac_mediacodec"), or NULL with no audio stream open.
 const char *decoder_audio_decoder(Decoder *d);
