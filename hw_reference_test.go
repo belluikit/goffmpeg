@@ -23,11 +23,13 @@ func softwareH264() bool {
 }
 
 // h264Ref is what FFmpeg's software h264 decodes a clip to: the frame count,
-// a hash of every frame through GetRGBA and through GetYCbCr (each frame's
-// planes, packed), and GetYCbCr's colour information.
+// a hash of every frame's planes through GetYCbCr (packed), and GetYCbCr's
+// colour information. The planes are the decoder's own output, the same on
+// every CPU. GetRGBA's are not: libswscale converts with different SIMD code
+// on x86 and on arm64, and the RGBA of the same planes differs between a
+// linux_amd64 runner and an arm64 Mac (#100's first CI run).
 type h264Ref struct {
 	frames int
-	rgba   string
 	planes string
 	info   YCbCrInfo
 }
@@ -40,21 +42,21 @@ type h264Ref struct {
 // in FFmpeg's output shows there first; GOFFMPEG_TEST_PRINT_REFERENCE=1 prints
 // them again.
 var h264Reference = map[string]h264Ref{
-	"testdata/sample.mp4":               {frames: 100, rgba: "c2c0a53a6fbdd2a53bfe3016776f776b339fc376dc822bfb0cfc5c48cc03b756", planes: "8b1e28d66435d798e464f511a824a4acafcc330acc9b818427b0d1b203c8d577", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
-	"testdata/sample_video.mp4":         {frames: 100, rgba: "c2c0a53a6fbdd2a53bfe3016776f776b339fc376dc822bfb0cfc5c48cc03b756", planes: "8b1e28d66435d798e464f511a824a4acafcc330acc9b818427b0d1b203c8d577", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
-	"testdata/yuv/bt709_tv.mp4":         {frames: 3, rgba: "b0294d261c7ba7b19bb6f9480677fe2b2b5a534bbd80cbcecc8458cd75f31fb5", planes: "2d5b14213ee4c21a4c39463a565cad464cc7945651c65ffad538823b94c06c58", info: YCbCrInfo{Matrix: MatrixBT709, FullRange: false, MatrixGuessed: false}},
-	"testdata/yuv/bt709_tv_320.mp4":     {frames: 3, rgba: "42131eb9cfcc831bf96c783c473389d75a90dfce534ff73f94adad5603dd2999", planes: "abdd5cb4b6fbabe3cf9631609a2f2cdd064548aa2ba0d7b3a603e4df5e30022c", info: YCbCrInfo{Matrix: MatrixBT709, FullRange: false, MatrixGuessed: false}},
-	"testdata/yuv/smpte170m_pc.mp4":     {frames: 3, rgba: "559e5f8ce8892e6d1819be7f2fbfa0c11cefd37f8c2f82de908178db11d5ba77", planes: "ee59ae0b0422ba4c3dd7650b01a9c19ab4602bc0b958362850d8d307df424af3", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: true, MatrixGuessed: false}},
-	"testdata/yuv/smpte170m_pc_320.mp4": {frames: 3, rgba: "f6fed7a60ab7d5f62aa28d04feec00f9b7e5eb0c7fe3c77e8277b5c8fc3e00c3", planes: "4a146bcfc3e47977d332a22b575e5fb2a48cf1fd6e96163471ef9c2a78f4233f", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: true, MatrixGuessed: false}},
+	"testdata/sample.mp4":               {frames: 100, planes: "8b1e28d66435d798e464f511a824a4acafcc330acc9b818427b0d1b203c8d577", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
+	"testdata/sample_video.mp4":         {frames: 100, planes: "8b1e28d66435d798e464f511a824a4acafcc330acc9b818427b0d1b203c8d577", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
+	"testdata/yuv/bt709_tv.mp4":         {frames: 3, planes: "2d5b14213ee4c21a4c39463a565cad464cc7945651c65ffad538823b94c06c58", info: YCbCrInfo{Matrix: MatrixBT709, FullRange: false, MatrixGuessed: false}},
+	"testdata/yuv/bt709_tv_320.mp4":     {frames: 3, planes: "abdd5cb4b6fbabe3cf9631609a2f2cdd064548aa2ba0d7b3a603e4df5e30022c", info: YCbCrInfo{Matrix: MatrixBT709, FullRange: false, MatrixGuessed: false}},
+	"testdata/yuv/smpte170m_pc.mp4":     {frames: 3, planes: "ee59ae0b0422ba4c3dd7650b01a9c19ab4602bc0b958362850d8d307df424af3", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: true, MatrixGuessed: false}},
+	"testdata/yuv/smpte170m_pc_320.mp4": {frames: 3, planes: "4a146bcfc3e47977d332a22b575e5fb2a48cf1fd6e96163471ef9c2a78f4233f", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: true, MatrixGuessed: false}},
 }
 
 // h264SeekReference is the first frame after Seek(2) in sample.mp4 (after
 // five frames from the start, as TestHardwareDecodeSeek decodes it): its
-// position and a hash of it through GetRGBA.
+// position and a hash of its planes through GetYCbCr.
 var h264SeekReference = struct {
 	position float64
-	rgba     string
-}{2, "1a7de48840dd3f9b660baa34f3076cf4c9f351aa2a056013eecdc2a4a2faf1b7"}
+	planes   string
+}{2, "63ad7c376624829b4cb4937757fb3ed17c136c7ccd5074b983adab6656ce6f52"}
 
 // referenceClips are the clips h264Reference covers.
 var referenceClips = []string{
@@ -76,7 +78,7 @@ func decodeReference(t *testing.T, path string) (h264Ref, string) {
 	}
 	defer dec.Close()
 	info := dec.VideoInfo()
-	rh, ph := sha256.New(), sha256.New()
+	ph := sha256.New()
 	var ref h264Ref
 	for {
 		mt, err := dec.Next()
@@ -89,11 +91,6 @@ func decodeReference(t *testing.T, path string) (h264Ref, string) {
 		if mt != MediaTypeVideo {
 			continue
 		}
-		rgba := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
-		if err := dec.GetRGBA(rgba); err != nil {
-			t.Fatalf("%s: frame %d: GetRGBA: %v", path, ref.frames, err)
-		}
-		rh.Write(rgba.Pix)
 		img := image.NewYCbCr(image.Rect(0, 0, info.Width, info.Height), image.YCbCrSubsampleRatio420)
 		yi, err := dec.(YCbCrDecoder).GetYCbCr(img)
 		if err != nil {
@@ -105,15 +102,14 @@ func decodeReference(t *testing.T, path string) (h264Ref, string) {
 		}
 		ref.frames++
 	}
-	ref.rgba = hex.EncodeToString(rh.Sum(nil))
 	ref.planes = hex.EncodeToString(ph.Sum(nil))
 	return ref, dec.(interface{ videoDecoder() string }).videoDecoder()
 }
 
-// seekReference decodes five frames of sample.mp4, seeks to 2 s and returns
-// the next video frame's position and RGBA hash, as TestHardwareDecodeSeek
-// does.
-func seekReference(t *testing.T) (float64, string) {
+// seekPlanes decodes five frames of sample.mp4, seeks to 2 s and returns the
+// next video frame's position, a hash of its planes and the decoder that
+// decoded it, as TestHardwareDecodeSeek does.
+func seekPlanes(t *testing.T) (float64, string, string) {
 	t.Helper()
 	dec, err := Open("testdata/sample.mp4")
 	if err != nil {
@@ -121,7 +117,7 @@ func seekReference(t *testing.T) (float64, string) {
 	}
 	defer dec.Close()
 	info := dec.VideoInfo()
-	rgba := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
+	img := image.NewYCbCr(image.Rect(0, 0, info.Width, info.Height), image.YCbCrSubsampleRatio420)
 	next := func() {
 		for {
 			mt, err := dec.Next()
@@ -129,7 +125,7 @@ func seekReference(t *testing.T) (float64, string) {
 				t.Fatalf("no video frame: %v, %v", mt, err)
 			}
 			if mt == MediaTypeVideo {
-				if err := dec.GetRGBA(rgba); err != nil {
+				if _, err := dec.(YCbCrDecoder).GetYCbCr(img); err != nil {
 					t.Fatal(err)
 				}
 				return
@@ -143,8 +139,8 @@ func seekReference(t *testing.T) (float64, string) {
 		t.Fatal(err)
 	}
 	next()
-	h := sha256.Sum256(rgba.Pix)
-	return dec.Position(), hex.EncodeToString(h[:])
+	h := sha256.Sum256(packed(img))
+	return dec.Position(), hex.EncodeToString(h[:]), dec.(interface{ videoDecoder() string }).videoDecoder()
 }
 
 // Desktop software decoding gives h264Reference, which the phones are held
@@ -162,7 +158,7 @@ func TestH264Reference(t *testing.T) {
 		}
 		got[path] = ref
 	}
-	pos, seekHash := seekReference(t)
+	pos, seekHash, _ := seekPlanes(t)
 	if os.Getenv("GOFFMPEG_TEST_PRINT_REFERENCE") != "" {
 		paths := make([]string, 0, len(got))
 		for p := range got {
@@ -171,10 +167,10 @@ func TestH264Reference(t *testing.T) {
 		sort.Strings(paths)
 		for _, p := range paths {
 			r := got[p]
-			fmt.Printf("\t%q: {frames: %d, rgba: %q, planes: %q, info: YCbCrInfo{Matrix: %s, FullRange: %v, MatrixGuessed: %v}},\n",
-				p, r.frames, r.rgba, r.planes, matrixName(r.info.Matrix), r.info.FullRange, r.info.MatrixGuessed)
+			fmt.Printf("\t%q: {frames: %d, planes: %q, info: YCbCrInfo{Matrix: %s, FullRange: %v, MatrixGuessed: %v}},\n",
+				p, r.frames, r.planes, matrixName(r.info.Matrix), r.info.FullRange, r.info.MatrixGuessed)
 		}
-		fmt.Printf("seek: position %v, rgba %q\n", pos, seekHash)
+		fmt.Printf("seek: position %v, planes %q\n", pos, seekHash)
 		return
 	}
 	for _, path := range referenceClips {
@@ -182,9 +178,9 @@ func TestH264Reference(t *testing.T) {
 			t.Errorf("%s: software h264 gives %+v, the recorded reference is %+v", path, got[path], h264Reference[path])
 		}
 	}
-	if pos != h264SeekReference.position || seekHash != h264SeekReference.rgba {
+	if pos != h264SeekReference.position || seekHash != h264SeekReference.planes {
 		t.Errorf("after Seek(2): software at %v with %s, the recorded reference %v with %s",
-			pos, seekHash, h264SeekReference.position, h264SeekReference.rgba)
+			pos, seekHash, h264SeekReference.position, h264SeekReference.planes)
 	}
 }
 

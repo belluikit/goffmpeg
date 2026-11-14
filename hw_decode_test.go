@@ -42,28 +42,24 @@ func androidH264(name string) bool {
 	return name == "h264_mediacodec" || name == "h264_mediacodec (c2.android.avc.decoder)"
 }
 
-// rgbaHash is a hash of every frame's RGBA, as h264Reference records it.
-func rgbaHash(d decoded) string {
-	h := sha256.New()
-	for _, f := range d.frames {
-		h.Write(f.Pix)
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// sameAsReference fails unless got is h264Reference's frames for path: the
+// sameAsReference fails unless got's planes are h264Reference's for path: the
 // check for a build with no software h264 to compare with (#77).
-func sameAsReference(t *testing.T, what, path string, got decoded) {
+func sameAsReference(t *testing.T, what, path string, got planes) {
 	t.Helper()
 	ref, ok := h264Reference[path]
 	if !ok {
 		t.Fatalf("no h264Reference for %s", path)
 	}
-	if len(got.frames) != ref.frames || rgbaHash(got) != ref.rgba {
-		t.Errorf("%s: %d frames, RGBA hash %s; software h264 gives %d, %s", what, len(got.frames), rgbaHash(got), ref.frames, ref.rgba)
+	h := sha256.New()
+	for _, f := range got.frames {
+		h.Write(f)
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	if len(got.frames) != ref.frames || sum != ref.planes || len(got.infos) == 0 || got.infos[0] != ref.info {
+		t.Errorf("%s: %d frames, planes %s, %+v; software h264 gives %d, %s, %+v", what, len(got.frames), sum, got.infos, ref.frames, ref.planes, ref.info)
 		return
 	}
-	t.Logf("%s: %d frames from %q (last %q), the same as software h264's", what, len(got.frames), got.decoder, got.last)
+	t.Logf("%s: %d frames from %q, the same planes as software h264's", what, len(got.frames), got.decoder)
 }
 
 type decoded struct {
@@ -182,9 +178,9 @@ func TestHardwareDecodeMatchesSoftware(t *testing.T) {
 	}
 	if !softwareH264() {
 		// The phones (#77): their own decoder is the only one.
-		hw := hwDecodeAll(t, "testdata/sample.mp4", "")
+		hw := hwPlanes(t, "testdata/sample.mp4", "")
 		sameAsReference(t, "default", "testdata/sample.mp4", hw)
-		requireHardware(t, hw)
+		requireHardware(t, decoded{decoder: hw.decoder, last: hw.decoder})
 		return
 	}
 	sw := hwDecodeAll(t, "testdata/sample.mp4", "0")
@@ -352,12 +348,12 @@ func TestHardwareDecodeSeek(t *testing.T) {
 	}
 	if !softwareH264() {
 		// The phones (#77): held to software h264's recorded frame.
-		img, pos, name := after("")
-		h := sha256.Sum256(img.Pix)
+		t.Setenv("GOFFMPEG_HWDECODE", "")
+		pos, sum, name := seekPlanes(t)
 		t.Logf("after Seek(2): %q at %.3f s", name, pos)
-		if pos != h264SeekReference.position || hex.EncodeToString(h[:]) != h264SeekReference.rgba {
-			t.Errorf("after Seek(2): at %v, RGBA hash %x; software h264 gives %v, %s",
-				pos, h, h264SeekReference.position, h264SeekReference.rgba)
+		if pos != h264SeekReference.position || sum != h264SeekReference.planes {
+			t.Errorf("after Seek(2): at %v, planes %s; software h264 gives %v, %s",
+				pos, sum, h264SeekReference.position, h264SeekReference.planes)
 		}
 		return
 	}
@@ -436,16 +432,7 @@ func TestHardwareDecodeYCbCr(t *testing.T) {
 			// MediaCodec's hardware decoder on the OnePlus Pad 2 refuses
 			// 64x64, and Android's software decoder decodes it (decision B).
 			hw := hwPlanes(t, path, "")
-			ref := h264Reference[path]
-			h := sha256.New()
-			for _, f := range hw.frames {
-				h.Write(f)
-			}
-			t.Logf("%s: %d frames from %q", path, len(hw.frames), hw.decoder)
-			if len(hw.frames) != ref.frames || hex.EncodeToString(h.Sum(nil)) != ref.planes || len(hw.infos) == 0 || hw.infos[0] != ref.info {
-				t.Errorf("%s: %d frames, planes %x, %+v; software h264 gives %d, %s, %+v",
-					path, len(hw.frames), h.Sum(nil), hw.infos, ref.frames, ref.planes, ref.info)
-			}
+			sameAsReference(t, "default", path, hw)
 			if runtime.GOOS == "android" && !androidH264(hw.decoder) {
 				t.Errorf("%s: decoded by %q, want MediaCodec", path, hw.decoder)
 			}

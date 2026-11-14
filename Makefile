@@ -200,7 +200,7 @@ ifeq ($(SET),media)
 	SET_DEMUXERS += mov
 	# The phones decode H.264 with their own decoders (#77): iOS with Apple's,
 	# h264_videotoolbox, below; Android with MediaCodec's, h264_mediacodec,
-	# hardware first and Android's software decoder for what it refuses
+	# hardware first and Android's software decoder for what it can't do
 	# (decision B). So the phones carry no FFmpeg h264.
 	SET_DECODERS += $(if $(filter ios_% iossimulator_% android_%,$(TARGET)),,h264)
 	SET_PARSERS  += h264
