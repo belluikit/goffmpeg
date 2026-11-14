@@ -416,7 +416,24 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st, const char *nam
 // sent are kept and replayed to the software decoder (hw_fallback), as they
 // were to FFmpeg's h264 before (owner, 2026-11-14). The software decoder has
 // nothing behind it. NULL when both refuse, and the stream is left out (#41).
+// ANDROID_AVC_MIN_SIDE: H.264 narrower or shorter than this goes straight to
+// Android's software decoder (#101). Measured 2026-11-14 with 10-frame clips
+// from 16x16 to 128x96: MediaTek's hardware decoder (moto g power 2024) takes
+// every one below 64x64 (64x48, 48x48, 32x24, ...) and gives no frame or only
+// some, with no error, and decodes 64x64 and up in full; Qualcomm's (OnePlus
+// Pad 2) refuses below 96x96 and Exynos's (Pixel 9a) below 32x32, at open;
+// Android's software decoder decodes every size in full on all three. A
+// picture that small costs nothing to decode in software.
+#define ANDROID_AVC_MIN_SIDE 64
+
 static AVCodecContext *open_android_h264(Decoder *d, AVStream *st) {
+    const AVCodecParameters *par = st->codecpar;
+    if (par->width > 0 && par->height > 0 &&
+        (par->width < ANDROID_AVC_MIN_SIDE || par->height < ANDROID_AVC_MIN_SIDE)) {
+        AVCodecContext *ctx = open_mediacodec(d, st, ANDROID_AVC);
+        if (ctx) d->hw->no_fallback = 1;
+        return ctx;
+    }
     AVCodecContext *ctx = open_mediacodec(d, st, NULL);
     if (ctx) {
         d->hw->android_fallback = 1;
@@ -821,6 +838,16 @@ int decoder_setup_streams(Decoder *d) {
         AVStream *st = d->fmt_ctx->streams[d->v_stream_idx];
         d->v_ctx = open_video(d, st);
         if (d->v_ctx) {
+            // A stream probing did not decode (H.264 with no FFmpeg h264 to
+            // decode it, #77) can come out of HLS with no size; the decoder
+            // has it, from the SPS (patches/0008). av_seek_frame picks the
+            // stream it seeks by from the codec parameters, and passed over a
+            // video stream with no size for the audio, after which HLS gave
+            // no video and audio with no timestamps (#101).
+            if (st->codecpar->width <= 0 || st->codecpar->height <= 0) {
+                st->codecpar->width = d->v_ctx->width;
+                st->codecpar->height = d->v_ctx->height;
+            }
             d->width = d->v_ctx->width;
             d->height = d->v_ctx->height;
             d->framerate = av_q2d(st->avg_frame_rate);

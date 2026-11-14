@@ -42,6 +42,7 @@ type h264Ref struct {
 // in FFmpeg's output shows there first; GOFFMPEG_TEST_PRINT_REFERENCE=1 prints
 // them again.
 var h264Reference = map[string]h264Ref{
+	"testdata/sample_video_cover.mp4":   {frames: 10, planes: "ba1498a41abd606f78e3d3fde095a6c2ff721a6aba4e391b850145ffe7797184", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
 	"testdata/sample.mp4":               {frames: 100, planes: "8b1e28d66435d798e464f511a824a4acafcc330acc9b818427b0d1b203c8d577", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
 	"testdata/sample_video.mp4":         {frames: 100, planes: "8b1e28d66435d798e464f511a824a4acafcc330acc9b818427b0d1b203c8d577", info: YCbCrInfo{Matrix: MatrixBT601, FullRange: false, MatrixGuessed: true}},
 	"testdata/yuv/bt709_tv.mp4":         {frames: 3, planes: "2d5b14213ee4c21a4c39463a565cad464cc7945651c65ffad538823b94c06c58", info: YCbCrInfo{Matrix: MatrixBT709, FullRange: false, MatrixGuessed: false}},
@@ -66,6 +67,8 @@ var referenceClips = []string{
 	"testdata/yuv/smpte170m_pc.mp4",
 	"testdata/yuv/bt709_tv_320.mp4",
 	"testdata/yuv/smpte170m_pc_320.mp4",
+	// 32x24: below ANDROID_AVC_MIN_SIDE, so Android's software decoder (#101)
+	"testdata/sample_video_cover.mp4",
 }
 
 // decodeReference decodes path with whatever decoder this build opens for it

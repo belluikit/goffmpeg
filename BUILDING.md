@@ -406,7 +406,7 @@ no longer reverses on its own, which was the only check before.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds eight patches**, six to FFmpeg's Android MediaCodec decoders, one
+**It holds nine patches**, seven to FFmpeg's Android MediaCodec decoders, one
 to its AudioToolbox decoder and one that adds a VideoToolbox decoder. None has been sent upstream yet, and FFmpeg
 master had none of these fixes when they were written (checked 2026-11-12 and
 2026-11-13). Each goes when the pin reaches an FFmpeg that fixes it.
@@ -440,6 +440,10 @@ master had none of these fixes when they were written (checked 2026-11-12 and
   and of MediaCodec's guess for a stream that states no colours. Stream
   probing used to fill both in with `h264`, which the Android set no longer
   has.
+- `0009-mediacodecdec-h264-new-codec-on-size-change.patch` (#101):
+  `h264_mediacodec` makes MediaCodec again when a new SPS changes the
+  picture's size, after draining the old size's frames. MediaTek's decoder gave
+  no frame after a resolution change.
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream
