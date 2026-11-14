@@ -167,13 +167,13 @@ func (d *cgoDecoder) videoDecoder() string {
 	return ""
 }
 
-// audioDecoder names the decoder the audio stream opened with ("aac",
-// "aac_mediacodec"), or "" with none. For tests (#77).
+// audioDecoder is decoder_audio_decoder: the decoder the audio stream opened
+// with ("aac", "aac_mediacodec"), or "" with none (#77).
 func (d *cgoDecoder) audioDecoder() string {
-	if d.d.a_ctx == nil || d.d.a_ctx.codec == nil {
-		return ""
+	if s := C.decoder_audio_decoder(&d.d); s != nil {
+		return C.GoString(s)
 	}
-	return C.GoString(d.d.a_ctx.codec.name)
+	return ""
 }
 
 func (d *cgoDecoder) VideoInfo() VideoInfo {
@@ -197,7 +197,8 @@ func (d *cgoDecoder) Position() float64 {
 }
 
 func (d *cgoDecoder) Next() (MediaType, error) {
-	return d.interrupted.nextResult(d.bridgeNext())
+	mt, err := d.interrupted.nextResult(d.bridgeNext())
+	return nameAudioDecoder(mt, err, d.audioDecoder)
 }
 
 func (d *cgoDecoder) bridgeNext() int { return int(C.decoder_next(&d.d)) }

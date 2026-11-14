@@ -5,6 +5,7 @@ package goffmpeg
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -209,6 +210,63 @@ func TestAACSeek(t *testing.T) {
 		}
 		if r := rms(pcm); r < 100 {
 			t.Errorf("%s: the audio after the seek is silence (RMS %.1f)", c.path, r)
+		}
+	}
+}
+
+// An AAC stream that opens and never decodes ends in an error, not in silence
+// (#95). testdata/aac/zeroed.m4a is lc.m4a with every byte of its audio data
+// (the mdat box) set to zero, so the header describes AAC-LC stereo and no
+// packet decodes; zeroed_short.m4a is its first 0.5 s (ffmpeg -t 0.5 -c copy),
+// 24 packets. FFmpeg's aac refuses the first packet as invalid data. Android's
+// decoder takes every packet and returns nothing, so the bridge gives up after
+// MEDIACODEC_AUDIO_NO_FRAME_PACKETS packets (zeroed.m4a's 132), or at the end
+// of the input (zeroed_short.m4a's 24), with an error wrapping ErrNoDecoder
+// that names the decoder: the phones have no other AAC decoder (#77). Before
+// #95 the audio there ended cleanly, having played nothing.
+func TestAACNoFrame(t *testing.T) {
+	if testCodecSet != "media" {
+		t.Skip("AAC is in the media set")
+	}
+	for _, path := range []string{"testdata/aac/zeroed.m4a", "testdata/aac/zeroed_short.m4a"} {
+		start := time.Now()
+		dec, err := Open(path)
+		if err != nil {
+			t.Fatalf("%s: Open: %v", path, err)
+		}
+		decoder := dec.(interface{ audioDecoder() string }).audioDecoder()
+		audio := 0
+		for {
+			var mt MediaType
+			mt, err = dec.Next()
+			if err != nil || mt == MediaTypeNone {
+				break
+			}
+			if mt == MediaTypeAudio {
+				if b, _ := dec.GetAudio(); len(b) > 0 {
+					audio++
+				}
+			}
+		}
+		took := time.Since(start)
+		dec.Close()
+		t.Logf("%s: %s: %d audio frames, then %v, in %v", path, decoder, audio, err, took.Round(time.Millisecond))
+		if audio != 0 {
+			t.Errorf("%s: %d audio frames with samples from data that is all zeros", path, audio)
+		}
+		if err == nil {
+			t.Errorf("%s: Next reached the end with no error, and no audio", path)
+			continue
+		}
+		if runtime.GOOS == "android" {
+			if !errors.Is(err, ErrNoDecoder) || !strings.Contains(err.Error(), "aac_mediacodec") {
+				t.Errorf("%s: Next: %v; want an error wrapping ErrNoDecoder that names aac_mediacodec", path, err)
+			}
+		} else if !errors.Is(err, avErrorInvalidData) {
+			t.Errorf("%s: Next: %v; want FFmpeg's aac refusing the data as invalid", path, err)
+		}
+		if took > 10*time.Second {
+			t.Errorf("%s: the error took %v", path, took)
 		}
 	}
 }

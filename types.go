@@ -344,6 +344,10 @@ func rgbaResult(rc int, info VideoInfo) error {
 // or audio stream, or both, and no decoder for any of them (#41). The error
 // names the codecs. An input with one stream this build decodes opens anyway,
 // and VideoInfo or AudioInfo names the other in MissingDecoder.
+//
+// Next returns an error wrapping it too, on Android, when the platform's
+// audio decoder opened and then returned no frame (#95), and names that
+// decoder.
 var ErrNoDecoder = errors.New("goffmpeg: this build has no decoder for any stream of the input")
 
 // ErrUnrecognizedInput reports an input no demuxer in this build recognizes:
@@ -439,6 +443,37 @@ const goffmpegAgain = 3
 // goffmpegTruncated mirrors GOFFMPEG_TRUNCATED in bridge.h.
 const goffmpegTruncated = 4
 
+// goffmpegNoAudioFrame mirrors GOFFMPEG_NO_AUDIO_FRAME in bridge.h.
+const goffmpegNoAudioFrame = 5
+
+// audioNoFrameError is what Next returns when Android's audio decoder opened
+// and returned no frame (#95): it failed before its first frame, reached the
+// end of the input without one, or took many packets and answered none, as
+// it does for data it cannot decode. It wraps ErrNoDecoder, because the audio
+// cannot play: the phones carry no FFmpeg AAC decoder to try instead (#77).
+// decoder names Android's decoder ("aac_mediacodec"), empty when a backend
+// cannot say.
+type audioNoFrameError struct{ decoder string }
+
+func (e *audioNoFrameError) Error() string {
+	d := e.decoder
+	if d == "" {
+		d = "the audio decoder"
+	}
+	return fmt.Sprintf("goffmpeg: audio: %s opened and returned no frame, and this build has no other decoder for it", d)
+}
+
+func (e *audioNoFrameError) Unwrap() error { return ErrNoDecoder }
+
+// nameAudioDecoder fills in the decoder an audioNoFrameError is about, which
+// nextResult cannot see.
+func nameAudioDecoder(mt MediaType, err error, name func() string) (MediaType, error) {
+	if e, ok := err.(*audioNoFrameError); ok && e.decoder == "" {
+		e.decoder = name()
+	}
+	return mt, err
+}
+
 // ErrStreamTruncated reports that the input stopped before the end of the
 // stream although FFmpeg called it the end of the file: over http, a
 // connection that dropped mid-file and a reconnect the server refused, as it
@@ -464,6 +499,8 @@ func nextResult(res int) (MediaType, error) {
 		return MediaTypeNone, ErrAgain
 	case res == goffmpegTruncated:
 		return MediaTypeNone, ErrStreamTruncated
+	case res == goffmpegNoAudioFrame:
+		return MediaTypeNone, &audioNoFrameError{}
 	case res < 0:
 		return MediaTypeNone, AVError(res)
 	default:

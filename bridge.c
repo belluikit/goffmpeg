@@ -586,6 +586,39 @@ const char *decoder_video_decoder(Decoder *d) {
     return d->v_ctx->codec->name;
 }
 
+// MEDIACODEC_AUDIO_NO_FRAME_PACKETS is how many packets Android's audio
+// decoder is sent without returning a frame before it is taken to have failed
+// (#95). Fed data it cannot decode, c2.android.aac takes every packet and
+// returns nothing, so without a bound the audio fails only at the end of the
+// input, however long that is. Measured on the OnePlus Pad 2, the AAC clips in
+// testdata (LC, HE, HEv2 and 5.1; M4A, MP4, ADTS and HLS) returned their first
+// frame after 5 to 7 packets. 64 packets is about 1.5 s of AAC-LC at 44.1 kHz.
+#define MEDIACODEC_AUDIO_NO_FRAME_PACKETS 64
+
+// mediacodec_audio is whether ctx is Android's audio decoder, which on the
+// phones has no FFmpeg decoder to fall back to (#77).
+static int mediacodec_audio(const AVCodecContext *ctx) {
+#if defined(__ANDROID__) && !defined(GOFFMPEG_NO_VIDEO)
+    return ctx->codec && ctx->codec->name && strstr(ctx->codec->name, "_mediacodec") != NULL;
+#else
+    (void)ctx;
+    return 0;
+#endif
+}
+
+// audio_no_frame ends decoding for Android's audio decoder returning no frame
+// (#95): ret is what it failed with, 0 for packets it took and never answered.
+static int audio_no_frame(Decoder *d, int ret) {
+    av_log(d->a_ctx, AV_LOG_ERROR, "%s returned no frame from %d packets (%s)\n",
+           d->a_ctx->codec->name, d->a_unanswered, ret ? av_err2str(ret) : "no error");
+    return GOFFMPEG_NO_AUDIO_FRAME;
+}
+
+const char *decoder_audio_decoder(Decoder *d) {
+    if (!d || !d->a_ctx || !d->a_ctx->codec) return NULL;
+    return d->a_ctx->codec->name;
+}
+
 // decoder_setup_streams finds the best video/audio streams, opens their
 // decoders, and prepares the swscale/swresample converters. Shared by
 // decoder_open (files/URLs), decoder_open_device (capture devices) and
@@ -646,6 +679,7 @@ int decoder_setup_streams(Decoder *d) {
             if (avcodec_open2(d->a_ctx, codec, NULL) < 0) avcodec_free_context(&d->a_ctx);
         }
         if (d->a_ctx) {
+            d->a_unanswered = mediacodec_audio(d->a_ctx) ? 0 : -1;
             d->sample_rate = d->a_ctx->sample_rate;
             d->a_frame = av_frame_alloc();
             // 0 = keep the stream's own layout. Callers that need a specific
@@ -904,9 +938,17 @@ int decoder_next(Decoder *d) {
         if (d->a_frame) {
             int ret = receive(d->a_ctx, d->a_frame);
             if (ret == 1) {
+                if (d->a_unanswered >= 0)
+                    av_log(d->a_ctx, AV_LOG_VERBOSE, "first frame after %d packets\n", d->a_unanswered);
+                d->a_unanswered = -1;
                 frame_position(d, d->a_frame, d->a_stream_idx);
                 return 2;
             }
+            // Android's decoder failing, or drained, before its first frame
+            // (#95). A drain is a failure only if it was sent something: an
+            // audio stream with no packets just ends.
+            if (d->a_unanswered >= 0 && ret < 0 && (ret != AVERROR_EOF || d->a_unanswered > 0))
+                return audio_no_frame(d, ret);
             if (ret < 0 && ret != AVERROR_EOF) return ret;
             a_done = ret == AVERROR_EOF;
         }
@@ -961,6 +1003,10 @@ int decoder_next(Decoder *d) {
         if (ctx && ctx == d->v_ctx) hw_keep(d, d->pkt);
         ret = ctx ? avcodec_send_packet(ctx, d->pkt) : 0;
         av_packet_unref(d->pkt);
+        if (ctx && ctx == d->a_ctx && d->a_unanswered >= 0) {
+            if (ret < 0 && ret != AVERROR(EAGAIN)) return audio_no_frame(d, ret);
+            if (++d->a_unanswered >= MEDIACODEC_AUDIO_NO_FRAME_PACKETS) return audio_no_frame(d, 0);
+        }
         // MediaCodec refusing a packet before its first frame is a fallback:
         // the packet was kept, and goes to the software decoder with the rest.
         if (ret < 0 && ctx == d->v_ctx && hw_refused(d)) ret = 0;

@@ -47,6 +47,8 @@ type cDecoder struct {
 	interrupt     uintptr
 	// The hardware decoder's state (#65), a C allocation the bridge owns.
 	hw uintptr
+	// Packets sent to Android's audio decoder with no frame back (#95).
+	a_unanswered int32
 }
 
 // The bridge returns C int, which is 32 bits. These must be declared int32,
@@ -65,6 +67,8 @@ var (
 	decoder_missing func(d *cDecoder, media int32) string
 	// nil against a libgoffmpeg older than #65; videoDecoder then reads empty.
 	decoder_video_decoder func(d *cDecoder) string
+	// nil against a libgoffmpeg older than #95; audioDecoder then reads empty.
+	decoder_audio_decoder func(d *cDecoder) string
 	decoder_open_device   func(d *cDecoder, format *byte, url *byte, options *byte) int32
 	// nil against a libgoffmpeg older than #5; openDeviceDecoder falls back to
 	// decoder_open_device and simply has no AVERROR to report.
@@ -182,6 +186,9 @@ func init() {
 	}
 	if hasSymbol(lib, "decoder_video_decoder") {
 		purego.RegisterLibFunc(&decoder_video_decoder, lib, "decoder_video_decoder")
+	}
+	if hasSymbol(lib, "decoder_audio_decoder") {
+		purego.RegisterLibFunc(&decoder_audio_decoder, lib, "decoder_audio_decoder")
 	}
 
 	// Same probe for the device-open AVERROR out-param. Its absence is not
@@ -446,8 +453,18 @@ func (d *puregoDecoder) Position() float64 {
 	return d.d.position
 }
 
+// audioDecoder is decoder_audio_decoder: the decoder the audio stream opened
+// with, empty with no audio or against an older libgoffmpeg.
+func (d *puregoDecoder) audioDecoder() string {
+	if decoder_audio_decoder == nil {
+		return ""
+	}
+	return decoder_audio_decoder(&d.d)
+}
+
 func (d *puregoDecoder) Next() (MediaType, error) {
-	return d.interrupted.nextResult(d.bridgeNext())
+	mt, err := d.interrupted.nextResult(d.bridgeNext())
+	return nameAudioDecoder(mt, err, d.audioDecoder)
 }
 
 func (d *puregoDecoder) bridgeNext() int { return int(decoder_next(&d.d)) }
