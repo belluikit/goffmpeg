@@ -176,18 +176,27 @@ On iOS, H.264 decodes only on VideoToolbox, through `h264_videotoolbox`, a
 decoder of its own (`patches/0006`), and the iOS builds carry no software
 H.264 decoder (#77). VP9 and AV1 decode on VideoToolbox where the device
 decodes them in hardware (an iPad of the 10th generation does neither, and
-decodes them in software). On Android H.264, VP9 and AV1 decode on
-MediaCodec (`h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec`) when the
+decodes them in software). On Android, H.264 decodes only on MediaCodec
+(`h264_mediacodec`), at every size, and the Android builds carry no FFmpeg
+H.264 decoder either (#77): on the phone's hardware decoder, and on Android's
+own software decoder (`c2.android.avc.decoder`, opened by name through
+`patches/0007`) for a stream the hardware refuses at open, as the OnePlus
+Pad 2's refuses 64×64. Below 1280×720 that costs more than FFmpeg's decoder
+did on a MediaTek phone (measured on #77: 55–68% of a core against 14–34% on
+the moto g power 2024) and about the same on the OnePlus Pad 2 and the Pixel 9a.
+VP9 and AV1 decode on MediaCodec (`vp9_mediacodec`, `av1_mediacodec`) when the
 video is larger than 1280×720, and in software at that size and below, where
 MediaCodec costs more than it saves (measured below). Only 8-bit 4:2:0 streams
 go to the hardware: H.264 Baseline, Main and High, VP9 profile 0, AV1 Main.
 Anything else (High 4:4:4, 10-bit, other codecs)
 decodes in software, and so does a stream the hardware decoder will not open,
-except H.264 on iOS, which has no software decoder: a stream VideoToolbox
-won't open is left out, and `VideoInfo().MissingDecoder` says `"h264"`. If it
-opens and gives no frame (an error first, the end of the input, or 64 packets
-without one), `Next` returns an error wrapping `ErrNoDecoder` that names
-`h264_videotoolbox`.
+except H.264 on the phones, which have no software decoder: a stream neither
+of the phone's decoders will open is left out, and
+`VideoInfo().MissingDecoder` says `"h264"`. If one opens and gives no frame (an
+error first, the end of the input, or 64 packets without one), `Next` returns
+an error wrapping `ErrNoDecoder` that names it (`h264_videotoolbox`,
+`h264_mediacodec`). High 4:4:4 and 10-bit play only where the device's own
+decoder does them, as the Pixel 9a's does High 4:4:4.
 So does a stream the device has no hardware decoder for, such as AV1 on most
 phones without a flagship chip: Android would otherwise decode it with its own
 software decoder in its media process, which costs more than goffmpeg's (#85).
@@ -232,8 +241,8 @@ environment variable, read when each input is opened, controls this:
 
 | `GOFFMPEG_HWDECODE` | |
 |---|---|
-| unset | hardware on iOS, and on Android above 1280×720; software elsewhere |
-| `0` | software video everywhere, except H.264 on iOS, which has only VideoToolbox (and AAC on the phones, which decodes on their own decoders) |
+| unset | hardware on iOS, and on Android for H.264 at every size and VP9 and AV1 above 1280×720; software elsewhere |
+| `0` | software video everywhere, except H.264 on the phones, which has only their own decoders (and AAC on the phones, likewise) |
 | `1` | as unset, and also VideoToolbox on macOS |
 | `force` | the hardware wherever the bridge has it, without the profile and size checks (for tests) |
 

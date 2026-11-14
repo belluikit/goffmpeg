@@ -1,0 +1,87 @@
+avcodec/mediacodecdec: add a codec_name option
+
+goffmpeg #77. Upstream: not submitted yet.
+
+h264_mediacodec and the other video decoders create the decoder the
+codec list offers for the stream's type and profile, or, with ndk_codec
+and no Java VM, the one Android creates for the type. A caller can't ask
+for a particular one. On Android, a stream the hardware decoder refuses
+can still play on Android's own software decoder, c2.android.avc.decoder:
+measured on a OnePlus Pad 2 (Android 16), c2.qti.avc.decoder refuses a
+64x64 H.264 stream at configure (-10000), and c2.android.avc.decoder
+decodes it.
+
+codec_name names the decoder to create. With it set there is no lookup,
+so no Java VM is needed, and the decoder is created by name, as
+ff_AMediaCodec_createCodecByName does for a looked-up one.
+
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index 0af5ae9b4b..6bd4f23235 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -60,6 +60,9 @@ typedef struct MediaCodecContext {
+     int use_ndk_codec;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
++    // The MediaCodec decoder to create, by name, instead of the one the
++    // codec list offers for the stream's type and profile
++    char *codec_name;
+ 
+     // AAC with no extradata: the AudioSpecificConfig aac_adtstoasc made from
+     // the first ADTS header, and whether MediaCodec still has to be given it
+@@ -470,6 +473,7 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+ 
+     s->ctx->delay_flush = s->delay_flush;
+     s->ctx->use_ndk_codec = s->use_ndk_codec;
++    s->ctx->requested_codec_name = s->codec_name;
+ 
+     if ((ret = ff_mediacodec_dec_init(avctx, s->ctx, codec_mime, format)) < 0) {
+         s->ctx = NULL;
+@@ -668,6 +672,8 @@ static const AVOption ff_mediacodec_vdec_options[] = {
+                    OFFSET(use_ndk_codec), AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, VD },
+     { "operating_rate", "The desired operating rate that the codec will need to operate at, zero for unspecified",
+             OFFSET(operating_rate), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, VD },
++    { "codec_name", "The MediaCodec decoder to use, by name (such as c2.android.avc.decoder), instead of the one the codec list offers",
++            OFFSET(codec_name), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, VD },
+     { NULL }
+ };
+ 
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 0e9c0404d1..348bc619e4 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -807,6 +807,20 @@ static int mediacodec_dec_get_video_codec(AVCodecContext *avctx, MediaCodecDecCo
+         }
+     }
+ 
++    if (s->requested_codec_name && *s->requested_codec_name) {
++        /* A decoder the caller named: Android's software decoder, say, for a
++         * stream the hardware decoder refuses. No lookup, so no Java VM. */
++        if (!(s->codec_name = av_strdup(s->requested_codec_name)))
++            return AVERROR(ENOMEM);
++        s->codec = ff_AMediaCodec_createCodecByName(s->codec_name, s->use_ndk_codec);
++        if (!s->codec) {
++            av_log(avctx, AV_LOG_ERROR, "Failed to create media decoder %s\n", s->codec_name);
++            return AVERROR_EXTERNAL;
++        }
++        av_log(avctx, AV_LOG_DEBUG, "Using the requested decoder %s\n", s->codec_name);
++        return 0;
++    }
++
+     profile = ff_AMediaCodecProfile_getProfileFromAVCodecContext(avctx);
+     if (profile < 0) {
+         av_log(avctx, AV_LOG_WARNING, "Unsupported or unknown profile\n");
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index da32e30447..eb954c5eed 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -71,6 +71,9 @@ typedef struct MediaCodecDecContext {
+     atomic_int serial;
+ 
+     bool use_ndk_codec;
++    // The decoder to create by name, or NULL to look one up by type; owned
++    // by the MediaCodecContext's options
++    const char *requested_codec_name;
+ 
+     /* Audio: the skip-samples side data of packets sent, by their pts in
+      * microseconds, so each frame gets its own packet's rather than the last

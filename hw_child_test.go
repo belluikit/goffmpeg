@@ -55,6 +55,13 @@ func TestHardwareDecodeChild(t *testing.T) {
 	frames := 0
 	for {
 		mt, err := dec.Next()
+		if errors.Is(err, ErrNoDecoder) {
+			// The phone's own decoder gave no frame, and there is no
+			// software one behind it (#77): TestHardwareDecodeStall reads it.
+			fmt.Printf("HWCHILD frames=%d error=%q decoder=%q\n", frames, err.Error(),
+				dec.(interface{ videoDecoder() string }).videoDecoder())
+			return
+		}
 		if err != nil {
 			t.Fatalf("Next: %v", err)
 		}

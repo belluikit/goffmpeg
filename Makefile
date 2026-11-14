@@ -197,9 +197,11 @@ SET_HWACCELS =
 SET_INDEVS   =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
-	# iOS decodes H.264 with Apple's own decoder, h264_videotoolbox, below
-	# (#77).
-	SET_DECODERS += $(if $(filter ios_% iossimulator_%,$(TARGET)),,h264)
+	# The phones decode H.264 with their own decoders (#77): iOS with Apple's,
+	# h264_videotoolbox, below; Android with MediaCodec's, h264_mediacodec,
+	# hardware first and Android's software decoder for what it refuses
+	# (decision B). So the phones carry no FFmpeg h264.
+	SET_DECODERS += $(if $(filter ios_% iossimulator_% android_%,$(TARGET)),,h264)
 	SET_PARSERS  += h264
 	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
 	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3

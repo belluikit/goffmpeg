@@ -240,6 +240,14 @@ struct DecoderHW {
     // (hw_fragile). After a fallback: the kind that failed.
     int delivered;
     int failed_kind;
+    // MediaCodec with no software decoder behind it: H.264 on Android, whose
+    // set has no FFmpeg h264 (#77 decision B). Its packets are counted, not
+    // kept, and a failure before its first frame ends decoder_next with
+    // GOFFMPEG_NO_VIDEO_FRAME, as HW_PLATFORM's does.
+    int no_fallback;
+    // What decoder_video_decoder reports when MediaCodec was opened by name:
+    // "h264_mediacodec (c2.android.avc.decoder)".
+    char label[64];
 };
 
 // hw_mode reads GOFFMPEG_HWDECODE: 0 software only, 1 the hardware where the
@@ -318,7 +326,10 @@ static AVCodecContext *open_software_video(AVStream *st) {
 #define MEDIACODEC_MIN_PIXELS (1280 * 720)
 
 
-static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
+// open_mediacodec opens MediaCodec's decoder for the stream: the one the codec
+// list offers for its type, or with name the decoder of that name (patches/0007),
+// as Android's own software decoder for what the hardware one refuses (#77).
+static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st, const char *name) {
     pthread_once(&mediacodec_log_once, mediacodec_log_install);
     pthread_once(&mediacodec_vm_once, mediacodec_find_java_vm);
     pthread_once(&mediacodec_pool_once, mediacodec_binder_pool);
@@ -338,6 +349,7 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     // measured on the OPD2403 (#65); the VM is only for the lookup.
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "ndk_codec", "1", 0);
+    if (name) av_dict_set(&opts, "codec_name", name, 0);
     mediacodec_opening = ctx;
     mediacodec_no_lookup = 0;
     int opened = avcodec_open2(ctx, codec, &opts);
@@ -354,7 +366,7 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
     // the caller opens the software decoder. Without a VM (a process with no
     // Java, Android before 12) there is no lookup to fail, and the NDK's
     // choice stands, as before.
-    if (opened >= 0 && mediacodec_no_lookup && av_jni_get_java_vm(NULL)) {
+    if (opened >= 0 && !name && mediacodec_no_lookup && av_jni_get_java_vm(NULL)) {
         av_log(ctx, AV_LOG_VERBOSE, "goffmpeg: no hardware %s decoder; decoding in software\n", avcodec_get_name(id));
         opened = AVERROR(ENOSYS);
     }
@@ -364,7 +376,21 @@ static AVCodecContext *open_mediacodec(Decoder *d, AVStream *st) {
         return NULL;
     }
     hw->kind = HW_MEDIACODEC;
+    if (name) snprintf(hw->label, sizeof(hw->label), "%s (%s)", codec->name, name);
     d->hw = hw;
+    return ctx;
+}
+
+// open_android_h264 opens H.264 for a build with no FFmpeg h264, the Android
+// media set (#77 decision B): MediaCodec's hardware decoder, and when it
+// refuses the stream at open, Android's own software decoder, which takes
+// what the hardware refuses by size (the OnePlus Pad 2 refuses 64x64, measured
+// 2026-11-14). Neither has software behind it. NULL when both refuse, and the
+// stream is left out (#41).
+static AVCodecContext *open_android_h264(Decoder *d, AVStream *st) {
+    AVCodecContext *ctx = open_mediacodec(d, st, NULL);
+    if (!ctx) ctx = open_mediacodec(d, st, "c2.android.avc.decoder");
+    if (ctx) d->hw->no_fallback = 1;
     return ctx;
 }
 
@@ -469,14 +495,21 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
     if ((id == AV_CODEC_ID_H264 || id == AV_CODEC_ID_VP9 || id == AV_CODEC_ID_AV1) &&
         (mode == 2 || (mode == 1 && hw_suits(st->codecpar)))) {
 #ifdef __ANDROID__
-        if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
-            ctx = open_mediacodec(d, st);
+        if (id != AV_CODEC_ID_H264 || avcodec_find_decoder_by_name("h264"))
+            if (mode == 2 || (int64_t)st->codecpar->width * st->codecpar->height > MEDIACODEC_MIN_PIXELS)
+                ctx = open_mediacodec(d, st, NULL);
 #endif
 #ifdef __APPLE__
         if (id != AV_CODEC_ID_H264 || avcodec_find_decoder_by_name("h264"))
             ctx = open_videotoolbox(d, st);
 #endif
     }
+#ifdef __ANDROID__
+    // With no software h264 (the Android media set), H.264 has only
+    // MediaCodec, at every size and whatever GOFFMPEG_HWDECODE says.
+    if (!ctx && id == AV_CODEC_ID_H264 && !avcodec_find_decoder_by_name("h264"))
+        return open_android_h264(d, st);
+#endif
 #ifdef __APPLE__
     // With no software h264 (the iOS media set), H.264 has only Apple's
     // decoder, whatever GOFFMPEG_HWDECODE says.
@@ -501,14 +534,14 @@ static AVCodecContext *open_video(Decoder *d, AVStream *st) {
 static int hw_fragile(Decoder *d) {
     struct DecoderHW *hw = d->hw;
     if (!hw) return 0;
-    if (hw->kind == HW_MEDIACODEC) return !hw->confirmed;
+    if (hw->kind == HW_MEDIACODEC) return !hw->confirmed && !hw->no_fallback;
     if (hw->kind == HW_VIDEOTOOLBOX) return !hw->delivered && d->v_ctx->codec_id == AV_CODEC_ID_AV1;
     return 0;
 }
 
 static void hw_keep(Decoder *d, const AVPacket *pkt) {
     struct DecoderHW *hw = d->hw;
-    if (hw && hw->kind == HW_PLATFORM) {
+    if (hw && (hw->kind == HW_PLATFORM || hw->no_fallback)) {
         if (!hw->confirmed) hw->npending++;
         return;
     }
@@ -538,6 +571,13 @@ static int hw_fallback(Decoder *d) {
 // hw_refused handles MediaCodec refusing a packet before its first frame:
 // it falls back and returns 1, or returns 0 when that is not the case or the
 // software decoder will not open.
+// hw_no_fallback_failed is whether the video decoder is one with nothing
+// behind it (MediaCodec for H.264 on Android, h264_videotoolbox on iOS) that
+// has not given its first frame: a failure now ends the stream (#77).
+static int hw_no_fallback_failed(Decoder *d) {
+    struct DecoderHW *hw = d->hw;
+    return hw && !hw->confirmed && (hw->kind == HW_PLATFORM || hw->no_fallback);
+}
 static int hw_refused(Decoder *d) {
     if (!hw_fragile(d)) return 0;
     return hw_fallback(d) == 0;
@@ -618,6 +658,12 @@ static int receive_video(Decoder *d) {
             hw->confirmed = 1;
             hw_drop_pending(hw);
         } else if ((ret < 0 && ret != AVERROR_EOF) || hw_silent(hw, ret)) {
+            if (hw->no_fallback) {
+                av_log(d->v_ctx, AV_LOG_ERROR, "%s returned no frame from %d packets (%s)\n",
+                       hw->label[0] ? hw->label : d->v_ctx->codec->name, hw->npending,
+                       ret < 0 ? av_err2str(ret) : "no error");
+                return GOFFMPEG_NO_VIDEO_FRAME;
+            }
             if (hw_fallback(d) == 0) return 0;
         }
     }
@@ -629,6 +675,7 @@ static void hw_free(Decoder *d) { (void)d; }
 static void hw_seeked(Decoder *d) { (void)d; }
 static void hw_keep(Decoder *d, const AVPacket *pkt) { (void)d; (void)pkt; }
 static int hw_refused(Decoder *d) { (void)d; return 0; }
+static int hw_no_fallback_failed(Decoder *d) { (void)d; return 0; }
 static int hw_replay(Decoder *d, AVPacket *pkt) { (void)d; (void)pkt; return 0; }
 static int receive_video(Decoder *d) { return receive(d->v_ctx, d->v_frame); }
 #endif
@@ -637,6 +684,8 @@ const char *decoder_video_decoder(Decoder *d) {
     if (!d || !d->v_ctx || !d->v_ctx->codec) return NULL;
 #ifndef GOFFMPEG_NO_VIDEO
     enum AVCodecID id = d->v_ctx->codec_id;
+    if (d->hw && d->hw->kind == HW_MEDIACODEC && d->hw->label[0])
+        return d->hw->label;
     if (d->hw && d->hw->kind == HW_VIDEOTOOLBOX && d->hw->confirmed)
         return id == AV_CODEC_ID_VP9 ? "vp9 (videotoolbox)" : id == AV_CODEC_ID_AV1 ? "av1 (videotoolbox)" : "h264 (videotoolbox)";
     // After hw_fallback the state stays, with no kind.
@@ -1079,6 +1128,8 @@ int decoder_next(Decoder *d) {
         }
         // MediaCodec refusing a packet before its first frame is a fallback:
         // the packet was kept, and goes to the software decoder with the rest.
+        // With no software decoder (H.264 on Android, #77) it is the end.
+        if (ret < 0 && ret != AVERROR(EAGAIN) && ctx == d->v_ctx && hw_no_fallback_failed(d)) return GOFFMPEG_NO_VIDEO_FRAME;
         if (ret < 0 && ctx == d->v_ctx && hw_refused(d)) ret = 0;
         if (ret < 0) return ret;
     }

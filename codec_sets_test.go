@@ -19,11 +19,14 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	wantDecoders := []string{"mp3float", "pcm_f32le", "pcm_f64le", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_u8"}
 	wantDemuxers := []string{"mp3", "wav"}
 	if testCodecSet == "media" {
-		// iOS decodes H.264 with Apple's own decoder (#77), a decoder of
-		// its own (patches/0006), and carries no software h264.
-		if runtime.GOOS == "ios" {
+		// The phones decode H.264 with their own decoders and carry no
+		// software h264 (#77): iOS with Apple's, a decoder of its own
+		// (patches/0006); Android with MediaCodec's h264_mediacodec, below.
+		switch runtime.GOOS {
+		case "ios":
 			wantDecoders = append(wantDecoders, "h264_videotoolbox")
-		} else {
+		case "android":
+		default:
 			wantDecoders = append(wantDecoders, "h264")
 		}
 		// mov for MP4; hls and mpegts for HLS, with what hls selects.

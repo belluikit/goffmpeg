@@ -304,7 +304,7 @@ avfilter are off in both: this library only ever decodes.
 | Set | Targets | Decoders | Demuxers | Where |
 |---|---|---|---|---|
 | **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has, plus dav1d (`libdav1d`) | every one | `shared/`, `-goffmpeg` |
-| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264` (on iOS `h264_videotoolbox`, #77), `vp9`, `libdav1d`, `av1`, `opus`; for AAC the phone's own decoder, `aac_mediacodec` on Android and `aac_at` on iOS (#77); on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
+| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264` (on the phones their own decoders instead, `h264_videotoolbox` on iOS and `h264_mediacodec` on Android, #77), `vp9`, `libdav1d`, `av1`, `opus`; for AAC the phone's own decoder, `aac_mediacodec` on Android and `aac_at` on iOS (#77); on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
 | **audio** | every target | `mp3float`, the same PCM, `opus`; for AAC `aac` on desktop, `aac_mediacodec` on Android, `aac_at` on iOS (#77 decision C) | `mp3`, `wav`, `ogg`, `mov`, `aac` | `shared-audio/`, `-goffmpeg-audio` |
 
 On the phones the media set decodes only what apps play, so an app carries no
@@ -406,8 +406,8 @@ no longer reverses on its own, which was the only check before.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds six patches**, four to FFmpeg's Android MediaCodec decoders, one to
-its AudioToolbox decoder and one that adds a VideoToolbox decoder. None has been sent upstream yet, and FFmpeg
+**It holds seven patches**, five to FFmpeg's Android MediaCodec decoders, one
+to its AudioToolbox decoder and one that adds a VideoToolbox decoder. None has been sent upstream yet, and FFmpeg
 master had none of these fixes when they were written (checked 2026-11-12 and
 2026-11-13). Each goes when the pin reaches an FFmpeg that fixes it.
 
@@ -431,6 +431,9 @@ master had none of these fixes when they were written (checked 2026-11-12 and
   H.264 decoder on VideoToolbox that needs no software `h264`, as
   `h264_mediacodec` needs none on Android. FFmpeg had VideoToolbox's H.264
   only as a hwaccel of its own `h264` decoder.
+- `0007-mediacodecdec-codec-name.patch` (#77): a `codec_name` option, so the
+  bridge can open Android's software decoder, `c2.android.avc.decoder`, by
+  name for a stream the hardware decoder refuses (decision B).
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream

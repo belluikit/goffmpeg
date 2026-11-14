@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -96,9 +97,24 @@ func TestHardwareDecodeStall(t *testing.T) {
 		t.Fatalf("child with %v printed no result:\n%s", env, out.String())
 		return "", "", 0
 	}
-	swFrames, _, _ := run("GOFFMPEG_HWDECODE=0")
 	hwFrames, hwDecoder, took := run("GOFFMPEG_HWDECODE=force", "GOFFMPEG_TEST_NO_BINDER_POOL=1")
 	t.Logf("no binder pool: %s, decoder %s, in %v", hwFrames, hwDecoder, took.Round(time.Millisecond))
+	if !softwareH264() {
+		// No FFmpeg h264 to fall back to (#77 decision B): a stalled
+		// MediaCodec ends the video with the error decision A asks for,
+		// within the 2 s patches/0001 waits, and one that needs no pool
+		// decodes software h264's frames.
+		ref := h264Reference["testdata/sample_video.mp4"]
+		want := fmt.Sprintf("frames=%d sha256=%s", ref.frames, ref.planes)
+		switch {
+		case hwFrames == want && hwDecoder == `"h264_mediacodec"`:
+		case strings.HasPrefix(hwFrames, "frames=0 error=") && strings.Contains(hwFrames, "h264_mediacodec") && took < 30*time.Second:
+		default:
+			t.Errorf("no binder pool: %s, decoder %s, in %v; want %s from h264_mediacodec, or no frame and its error within 30 s", hwFrames, hwDecoder, took, want)
+		}
+		return
+	}
+	swFrames, _, _ := run("GOFFMPEG_HWDECODE=0")
 	if hwFrames != swFrames {
 		t.Errorf("no binder pool: %s, software %s", hwFrames, swFrames)
 	}
