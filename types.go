@@ -345,9 +345,9 @@ func rgbaResult(rc int, info VideoInfo) error {
 // names the codecs. An input with one stream this build decodes opens anyway,
 // and VideoInfo or AudioInfo names the other in MissingDecoder.
 //
-// Next returns an error wrapping it too, on Android, when the platform's
-// audio decoder opened and then returned no frame (#95), and names that
-// decoder.
+// Next returns an error wrapping it too, on Android and iOS, when the
+// platform's audio decoder opened and then returned no frame (#95), and names
+// that decoder.
 var ErrNoDecoder = errors.New("goffmpeg: this build has no decoder for any stream of the input")
 
 // ErrUnrecognizedInput reports an input no demuxer in this build recognizes:
@@ -446,13 +446,13 @@ const goffmpegTruncated = 4
 // goffmpegNoAudioFrame mirrors GOFFMPEG_NO_AUDIO_FRAME in bridge.h.
 const goffmpegNoAudioFrame = 5
 
-// audioNoFrameError is what Next returns when Android's audio decoder opened
-// and returned no frame (#95): it failed before its first frame, reached the
+// audioNoFrameError is what Next returns when the phone's own audio decoder,
+// Android's or Apple's, opened and returned no frame (#95): it failed before its first frame, reached the
 // end of the input without one, or took many packets and answered none, as
 // it does for data it cannot decode. It wraps ErrNoDecoder, because the audio
 // cannot play: the phones carry no FFmpeg AAC decoder to try instead (#77).
-// decoder names Android's decoder ("aac_mediacodec"), empty when a backend
-// cannot say.
+// decoder names it ("aac_mediacodec", "aac_at"), empty when a backend cannot
+// say.
 type audioNoFrameError struct{ decoder string }
 
 func (e *audioNoFrameError) Error() string {

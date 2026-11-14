@@ -304,8 +304,8 @@ avfilter are off in both: this library only ever decodes.
 | Set | Targets | Decoders | Demuxers | Where |
 |---|---|---|---|---|
 | **media** | desktop: `darwin_*`, `linux_*`, `windows_*` | every one FFmpeg has, plus dav1d (`libdav1d`) | every one | `shared/`, `-goffmpeg` |
-| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `aac`, `vp9`, `libdav1d`, `av1`, `opus`; on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
-| **audio** | every target | `mp3float`, the same PCM, `opus` | `mp3`, `wav`, `ogg` | `shared-audio/`, `-goffmpeg-audio` |
+| **media** | phones: `android_*`, `ios_*` | `mp3float`, `pcm_s16le` `s24le` `s32le` `f32le` `f64le` `u8`, `h264`, `vp9`, `libdav1d`, `av1`, `opus`; for AAC the phone's own decoder, `aac_mediacodec` on Android and `aac_at` on iOS (#77); on Android also `h264_mediacodec`, `vp9_mediacodec`, `av1_mediacodec` | `mp3`, `wav`, `mov`, `matroska` (WebM), `ogg`; `hls`, `mpegts` and what `hls` selects: `aac`, `ac3`, `eac3` | `shared/`, `-goffmpeg` |
+| **audio** | every target | `mp3float`, the same PCM, `opus`; for AAC `aac` on desktop, `aac_mediacodec` on Android, `aac_at` on iOS (#77 decision C) | `mp3`, `wav`, `ogg`, `mov`, `aac` | `shared-audio/`, `-goffmpeg-audio` |
 
 On the phones the media set decodes only what apps play, so an app carries no
 codec it doesn't need, and none of the patent-encumbered ones unless it plays
@@ -402,10 +402,10 @@ no longer reverses on its own, which was the only check before.
 Each file carries a full commit message explaining the bug, so it can be sent
 upstream as-is with `git format-patch`.
 
-**It holds four patches**, all to FFmpeg's Android MediaCodec decoders. None
-has been sent upstream yet, and FFmpeg master had none of these fixes when
-they were written (checked 2026-11-12 and 2026-11-13). Each goes when the pin
-reaches an FFmpeg that fixes it.
+**It holds five patches**, four to FFmpeg's Android MediaCodec decoders and
+one to its AudioToolbox decoder. None has been sent upstream yet, and FFmpeg
+master had none of these fixes when they were written (checked 2026-11-12 and
+2026-11-13). Each goes when the pin reaches an FFmpeg that fixes it.
 
 - `0001-mediacodecdec-stall-before-first-frame.patch` (#88): a MediaCodec that,
   before its first frame, takes no input and returns no frame for 2 s makes
@@ -420,6 +420,9 @@ reaches an FFmpeg that fixes it.
 - `0004-mediacodecdec-audio-frame-size.patch` (#77): the audio decoders report
   a frame size, without which raw ADTS packets had no timestamps and could not
   be seeked.
+- `0005-audiotoolboxdec-he-aac-layers.patch` (#77): `aac_at`, Apple's decoder
+  on iOS, decodes HE-AAC and HE-AACv2 in full. It decoded only the AAC core:
+  half the rate, and HE-AACv2 in mono.
 
 Before it, the directory was empty. Its previous occupant was a v4l2
 `mmap_free` fix for #14, dropped at an FFmpeg bump because upstream

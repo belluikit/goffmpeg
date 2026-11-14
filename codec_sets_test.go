@@ -20,10 +20,6 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 	wantDemuxers := []string{"mp3", "wav"}
 	if testCodecSet == "media" {
 		wantDecoders = append(wantDecoders, "h264")
-		if runtime.GOOS != "android" {
-			// Android decodes AAC with its own decoder (#77), below.
-			wantDecoders = append(wantDecoders, "aac")
-		}
 		// mov for MP4; hls and mpegts for HLS, with what hls selects.
 		wantDemuxers = append(wantDemuxers, "mov", "hls", "mpegts", "aac", "ac3", "eac3")
 		switch runtime.GOOS {
@@ -35,6 +31,32 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 		}
 	}
 	decoders, demuxers := builtComponents()
+	// A demuxer's name can be a list of the formats it reads: configure's
+	// mov is "mov,mp4,m4a,3gp,3g2,mj2" at run time. Its first is the name.
+	for i, d := range demuxers {
+		demuxers[i], _, _ = strings.Cut(d, ",")
+	}
+	// AAC in both sets (#77): the phones' own decoders, Android's and Apple's,
+	// so they carry no FFmpeg AAC decoder, and FFmpeg's aac on desktop. The
+	// audio set reads it from M4A and ADTS (decision C). An audio set without
+	// the mov demuxer predates that, as the published goffmpeg-libs do until
+	// their next release: its AAC is not checked.
+	aacDecoder := "aac"
+	switch runtime.GOOS {
+	case "android":
+		aacDecoder = "aac_mediacodec"
+	case "ios":
+		aacDecoder = "aac_at"
+	}
+	switch {
+	case testCodecSet == "media":
+		wantDecoders = append(wantDecoders, aacDecoder)
+	case slices.Contains(demuxers, "mov"):
+		wantDecoders = append(wantDecoders, aacDecoder)
+		wantDemuxers = append(wantDemuxers, "mov", "aac")
+	default:
+		t.Log("the loaded audio set predates AAC (#77): its AAC is not checked")
+	}
 	// The royalty-free formats (#78, goffmpeg-libs v0.9.0): Opus in Ogg in
 	// both sets; VP9, AV1 (dav1d) and WebM in the media set, with the phones'
 	// hardware decoders.
@@ -44,13 +66,8 @@ func TestBuiltCodecsAreTheSet(t *testing.T) {
 		wantDecoders = append(wantDecoders, "vp9", "libdav1d", "av1")
 		wantDemuxers = append(wantDemuxers, "matroska")
 		if runtime.GOOS == "android" {
-			wantDecoders = append(wantDecoders, "vp9_mediacodec", "av1_mediacodec", "aac_mediacodec")
+			wantDecoders = append(wantDecoders, "vp9_mediacodec", "av1_mediacodec")
 		}
-	}
-	// A demuxer's name can be a list of the formats it reads: configure's
-	// mov is "mov,mp4,m4a,3gp,3g2,mj2" at run time. Its first is the name.
-	for i, d := range demuxers {
-		demuxers[i], _, _ = strings.Cut(d, ",")
 	}
 	for _, c := range []struct {
 		kind      string

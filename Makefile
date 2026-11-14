@@ -51,6 +51,9 @@ BASE_CONF = \
 MACOS_MIN  := 11.0
 IOS_MIN    := 13.0
 APPLE_CONF = --enable-securetransport --enable-videotoolbox
+# The phones decode AAC with Apple's own decoder, aac_at (#77), which
+# AudioToolbox provides; --disable-autodetect leaves it off elsewhere.
+IOS_CONF   = $(APPLE_CONF) --enable-audiotoolbox
 
 MACOS_CONF = $(APPLE_CONF) --enable-avdevice --enable-avfoundation
 
@@ -68,7 +71,7 @@ endif
 
 ifeq ($(TARGET),ios_arm64)
 	IOS_SDK := $(shell xcrun --sdk iphoneos --show-sdk-path)
-	TARGET_CONF = --arch=arm64 --target-os=darwin --enable-cross-compile $(APPLE_CONF) \
+	TARGET_CONF = --arch=arm64 --target-os=darwin --enable-cross-compile $(IOS_CONF) \
 		--disable-avdevice \
 		--cc="clang -arch arm64 -isysroot $(IOS_SDK) -mios-version-min=$(IOS_MIN)" \
 		--extra-ldflags="-isysroot $(IOS_SDK) -mios-version-min=$(IOS_MIN)"
@@ -77,7 +80,7 @@ endif
 
 ifeq ($(TARGET),iossimulator_arm64)
 	SIM_SDK := $(shell xcrun --sdk iphonesimulator --show-sdk-path)
-	TARGET_CONF = --arch=arm64 --target-os=darwin --enable-cross-compile $(APPLE_CONF) \
+	TARGET_CONF = --arch=arm64 --target-os=darwin --enable-cross-compile $(IOS_CONF) \
 		--disable-avdevice \
 		--cc="clang -arch arm64 -isysroot $(SIM_SDK) -mios-simulator-version-min=$(IOS_MIN)" \
 		--extra-ldflags="-isysroot $(SIM_SDK) -mios-simulator-version-min=$(IOS_MIN)"
@@ -169,8 +172,8 @@ endif
 #              carries no codec it doesn't need. On desktop (darwin_*,
 #              linux_*, windows_*), every decoder, demuxer and parser FFmpeg
 #              has. In shared/, named -goffmpeg as before.
-#   SET=audio  MP3 and WAV only, on every target: no video decoder, no
-#              libswscale, no libavdevice. In shared-audio/, named
+#   SET=audio  MP3, WAV, Opus and AAC (in M4A and ADTS), on every target: no
+#              video decoder, no libswscale, no libavdevice. In shared-audio/, named
 #              -goffmpeg-audio, so a binary shows which set it loads and a
 #              package can't mix the two. goffmpeg's goffmpeg_novideo tag
 #              links it.
@@ -194,9 +197,8 @@ SET_HWACCELS =
 SET_INDEVS   =
 ifeq ($(SET),media)
 	SET_DEMUXERS += mov
-	# Android decodes AAC with its own decoder, aac_mediacodec, below (#77).
-	SET_DECODERS += h264 $(if $(filter android_%,$(TARGET)),,aac)
-	SET_PARSERS  += h264 aac
+	SET_DECODERS += h264
+	SET_PARSERS  += h264
 	# HLS (owner, #41), which bellui's x/mmedia plays: the playlist demuxer
 	# and MPEG-TS for its segments. hls selects the aac, ac3 and eac3
 	# demuxers and the ac3 parser, listed so check-components holds the set
@@ -213,8 +215,9 @@ ifeq ($(SET),media)
 	SHARED_SUFFIX   := -goffmpeg
 	SHARED_DIR_NAME := shared
 else ifeq ($(SET),audio)
-	# Opus in Ogg (owner, #78), beside MP3 and WAV.
-	SET_DEMUXERS += ogg
+	# Opus in Ogg (owner, #78), beside MP3 and WAV, and AAC in M4A and ADTS
+	# (owner, #77 decision C), for ads and songs an audio-only app plays.
+	SET_DEMUXERS += ogg mov aac
 	SET_DECODERS += opus
 	SET_PARSERS  += opus
 	SHARED_SUFFIX   := -goffmpeg-audio
@@ -226,6 +229,11 @@ endif
 # reads cameras on each OS, and the decoders for what cameras deliver, raw
 # frames or MJPEG (v4l2, dshow). The other input devices are off: they aren't
 # used, and gdigrab, Windows' screen capture, selects the bmp decoder.
+# AAC, in both sets: on the phones only the OS's own decoder (#77), Android's
+# aac_mediacodec (below) and Apple's aac_at, so they carry no FFmpeg AAC
+# decoder; on desktop FFmpeg's aac. aac_at selects the aac_adtstoasc filter.
+SET_PARSERS  += aac
+SET_DECODERS += $(if $(filter ios_% iossimulator_%,$(TARGET)),aac_at,$(if $(filter android_%,$(TARGET)),,aac))
 ifeq ($(SET)$(filter darwin_% linux_% windows_%,$(TARGET)),media$(TARGET))
 	SET_DECODERS += rawvideo mjpeg
 	SET_INDEVS   += $(if $(filter darwin_%,$(TARGET)),avfoundation,$(if $(filter linux_%,$(TARGET)),v4l2,dshow))
@@ -242,9 +250,12 @@ endif
 # by name.
 # The same for VP9 and AV1 (#78), and for AAC (#77): Android's own AAC
 # decoder, so the phones need no FFmpeg AAC decoder. It selects the
-# aac_adtstoasc filter and the aac parser.
+# aac_adtstoasc filter and the aac parser, and is in the audio set too.
 ifeq ($(SET)$(filter android_%,$(TARGET)),media$(TARGET))
-	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec aac_mediacodec
+	SET_DECODERS += h264_mediacodec vp9_mediacodec av1_mediacodec
+endif
+ifneq ($(filter android_%,$(TARGET)),)
+	SET_DECODERS += aac_mediacodec
 endif
 
 # The desktop media set has every codec (owner, #41): the lists above are
