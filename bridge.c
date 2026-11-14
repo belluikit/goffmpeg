@@ -590,9 +590,10 @@ const char *decoder_video_decoder(Decoder *d) {
 // decoder is sent without returning a frame before it is taken to have failed
 // (#95). Fed data it cannot decode, c2.android.aac takes every packet and
 // returns nothing, so without a bound the audio fails only at the end of the
-// input, however long that is. Measured on the OnePlus Pad 2, the AAC clips in
-// testdata (LC, HE, HEv2 and 5.1; M4A, MP4, ADTS and HLS) returned their first
-// frame after 5 to 7 packets. 64 packets is about 1.5 s of AAC-LC at 44.1 kHz.
+// input, however long that is. Measured on a Pixel 9a, a moto g power 2024 and
+// a OnePlus Pad 2, the AAC clips in testdata (LC, HE, HEv2 and 5.1; M4A, MP4,
+// ADTS and HLS) returned their first frame after 5 to 8 packets. 64 packets is
+// about 1.5 s of AAC-LC at 44.1 kHz.
 #define MEDIACODEC_AUDIO_NO_FRAME_PACKETS 64
 
 // mediacodec_audio is whether ctx is Android's audio decoder, which on the
